@@ -18,6 +18,26 @@ endif(USE_SYSTEM_CPR)
 #discord example program
 set(CLANG_FORMAT_SUFFIX "ignore") #try to disable clang formatter
 option(BUILD_EXAMPLES "Build example apps" OFF)
+#discord-rpc tracks the upstream repo unmodified; its rapidjson find_file()
+#must not fall back to host/NDK-sysroot default paths when cross-compiling,
+#so apply our local patch instead of carrying a fork.
+#(git apply --check fails when the patch is already applied -> idempotent)
+execute_process(
+    COMMAND git apply --check ${CMAKE_CURRENT_SOURCE_DIR}/discord-rpc-01-android-rapidjson.patch
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/discord-rpc
+    RESULT_VARIABLE _discord_patch_check
+    ERROR_QUIET
+)
+if(_discord_patch_check EQUAL 0)
+    execute_process(
+        COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/discord-rpc-01-android-rapidjson.patch
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/discord-rpc
+        RESULT_VARIABLE _discord_patch_status
+    )
+    if(NOT _discord_patch_status EQUAL 0)
+        message(FATAL_ERROR "Failed to apply discord-rpc Android patch")
+    endif()
+endif()
 add_subdirectory(discord-rpc)
 target_include_directories(discord-rpc PUBLIC discord-rpc/include)
 
