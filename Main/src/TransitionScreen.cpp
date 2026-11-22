@@ -32,6 +32,15 @@ class TransitionScreen_Impl : public TransitionScreen
 	bool m_canCancel = true;
 	bool m_initialized = false;
 
+	// Report the target screen's preference so touch zones (and their overlay)
+	// are already active during the transition, instead of popping in late
+	bool WantsTouchZones() const override
+	{
+		if (m_tickableToLoad)
+			return m_tickableToLoad->WantsTouchZones();
+		return IApplicationTickable::WantsTouchZones();
+	}
+
 	//0 = normal, 1 = song
 	bool m_legacy[2] = {false, false};
 	int m_jacketImg = 0;

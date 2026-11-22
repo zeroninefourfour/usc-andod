@@ -15,6 +15,30 @@ namespace Graphics
 	};
 
 	/*
+		Default value for a uniform declared with an initializer (e.g. "uniform int x = 1;").
+		Desktop GLSL supports initializers, GLSL ES 100 does not: the ES shader
+		translator strips them and records the values here so they can be applied
+		with glUniform calls after the program links.
+	*/
+	struct ShaderUniformDefault
+	{
+		String name;
+		uint8 numComponents = 0; // 1-4, or 0 if the initializer could not be evaluated
+		double values[4] = { 0.0, 0.0, 0.0, 0.0 };
+
+		// Value for component index i, splatting single-component defaults and
+		// padding missing components with 0
+		double GetComponent(size_t i) const
+		{
+			if (numComponents == 0)
+				return 0.0;
+			if (numComponents == 1)
+				return values[0];
+			return i < numComponents ? values[i] : 0.0;
+		}
+	};
+
+	/*
 		A single unlinked OpenGL shader
 	*/
 	class ShaderRes
@@ -46,6 +70,10 @@ namespace Graphics
 
 		[[nodiscard]]
 		virtual String GetOriginalName() const = 0;
+
+		// Uniform default values from GLSL initializers, stripped by the ES shader translator
+		[[nodiscard]]
+		virtual const Vector<ShaderUniformDefault>& GetUniformDefaults() const = 0;
 	};
 
 	typedef Ref<ShaderRes> Shader;

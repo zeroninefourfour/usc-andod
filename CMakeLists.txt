@@ -140,7 +140,18 @@ include(${PROJECT_SOURCE_DIR}/cmake/Macros.cmake)
 
 # Sub-Project directories
 add_subdirectory(third_party)
-include(${PROJECT_SOURCE_DIR}/third_party/backbeat/Backbeat.cmake)
+if(ANDROID)
+    # Support devices with 16KB kernel pages (Android 15+): align ELF segments
+    # to 16KB so the .so loads without the compat-mode page-size warning.
+    add_link_options("-Wl,-z,max-page-size=16384")
+    # No prebuilt Backbeat SDK for Android: use the local stub so the game builds
+    # without Backbeat bundle support.
+    add_library(BackbeatStub STATIC ${PROJECT_SOURCE_DIR}/Backbeat/android/backbeat_stub.c)
+    target_include_directories(BackbeatStub PUBLIC ${PROJECT_SOURCE_DIR}/Backbeat/android)
+    add_library(Backbeat::Backbeat ALIAS BackbeatStub)
+else()
+    include(${PROJECT_SOURCE_DIR}/third_party/backbeat/Backbeat.cmake)
+endif()
 add_subdirectory(Shared)
 add_subdirectory(Backbeat)
 add_subdirectory(Graphics)

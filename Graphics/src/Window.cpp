@@ -28,6 +28,9 @@ namespace Graphics
 		SDL()
 		{
 			SDL_SetMainReady();
+			// Keep SDL's default touch->mouse emulation enabled so menus (which are
+			// mouse-driven) receive clicks at the tapped position. Input.cpp
+			// suppresses the emulated mouse laser while real touches are active.
 			int r = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
 			if (r != 0)
 			{
@@ -73,8 +76,16 @@ namespace Graphics
 			SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 2);
 			SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 0);
 
+#ifdef ANDROID
+			// Some ROMs honor the requested window size instead of giving the
+			// full display; force a real fullscreen window so the game always
+			// covers the whole screen regardless of the saved config size.
+			uint32 wndFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_FULLSCREEN_DESKTOP;
+#else
+			uint32 wndFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+#endif
 			m_window = SDL_CreateWindow(*titleUtf8, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-										m_clntSize.x, m_clntSize.y, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+										m_clntSize.x, m_clntSize.y, wndFlags);
 
 			if (!m_window) {
 				const char* err = SDL_GetError();
@@ -368,6 +379,18 @@ namespace Graphics
 					else if (evt.type == SDL_EventType::SDL_MOUSEMOTION)
 					{
 						outer.OnMouseMotion.Call(evt.motion.xrel, evt.motion.yrel);
+					}
+					else if (evt.type == SDL_EventType::SDL_FINGERDOWN)
+					{
+						outer.OnTouchDown.Call((int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
+					}
+					else if (evt.type == SDL_EventType::SDL_FINGERMOTION)
+					{
+						outer.OnTouchMove.Call((int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
+					}
+					else if (evt.type == SDL_EventType::SDL_FINGERUP)
+					{
+						outer.OnTouchUp.Call((int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
 					}
 					else if (evt.type == SDL_EventType::SDL_QUIT)
 					{

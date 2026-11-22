@@ -72,18 +72,33 @@ namespace Graphics
 		SDL_Window* sdlWnd = (SDL_Window*)m_window->Handle();
 
 #ifdef EMBEDDED
+		// Try the highest GLES version first (GLSL ES 320 enables geometry
+		// shaders and is nearly 1:1 with desktop GLSL 330 skin shaders) and
+		// walk down. ES3 contexts are backwards compatible, so GLSL ES 100
+		// shaders (nanovg, nuklear, USC's own shaders) keep working on all of
+		// these.
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+		const int contextVersions[3][2] = { {3,2}, {3,0}, {2,0} };
+		const int nVersions = (int)(sizeof(contextVersions) / sizeof(contextVersions[0]));
+		for (int i = 0; i < nVersions && !m_impl->context; i++)
+		{
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, contextVersions[i][0]);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, contextVersions[i][1]);
+			m_impl->context = SDL_GL_CreateContext(sdlWnd);
+			if (!m_impl->context && i + 1 < nVersions)
+			{
+				Logf("GLES %d.%d context unavailable (%s), trying next version",
+					Logger::Severity::Warning, contextVersions[i][0], contextVersions[i][1], SDL_GetError());
+			}
+		}
 #else
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
 		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
 #endif
 		// Create a context
-		m_impl->context = SDL_GL_CreateContext(sdlWnd);
 		char errmsg[512];
-		if(!m_impl->context)
+		if (!m_impl->context)
 		{
 			snprintf(errmsg, 512, "Failed to create OpenGL context: %s", SDL_GetError());
             Log(errmsg, Logger::Severity::Error);

@@ -128,6 +128,65 @@ static int lBeginPath(lua_State* L)
 }
 
 
+// Animation frames are FHD (or bigger) jpg/png sequences that get uploaded to
+// a GLES texture on every frame change via nvgUpdateImage. On Android those
+// uploads are client-side and synchronous (ES2 nanovg has no PBO), so every
+// frame change stalls the render thread for milliseconds - the animations
+// stutter while the rest of the UI stays smooth. The frames are stretched to
+// the screen anyway, so on Android they are downscaled (box average) to a
+// much smaller texture before upload.
+static Ref<ImageRes> ScaleAnimationFrame(Ref<ImageRes> img)
+{
+	if (!img)
+		return img;
+#ifdef ANDROID
+	Vector2i sz = img->GetSize();
+	constexpr int32 cap = 960;
+	if (sz.x <= cap && sz.y <= cap)
+		return img;
+
+	float scale = (float)cap / Math::Max(sz.x, sz.y);
+	Vector2i nsz = { (int32)(sz.x * scale + 0.5f), (int32)(sz.y * scale + 0.5f) };
+	Ref<ImageRes> out = ImageRes::Create(nsz);
+	const unsigned char* src = (const unsigned char*)img->GetBits();
+	unsigned char* dst = (unsigned char*)out->GetBits();
+
+	// Box-average downscale, RGBA8
+	for (int32 y = 0; y < nsz.y; y++)
+	{
+		int32 sy0 = (int32)(((int64)y * sz.y) / nsz.y);
+		int32 sy1 = (int32)(((int64)(y + 1) * sz.y) / nsz.y);
+		if (sy1 <= sy0) sy1 = sy0 + 1;
+		if (sy1 > sz.y) sy1 = sz.y;
+		for (int32 x = 0; x < nsz.x; x++)
+		{
+			int32 sx0 = (int32)(((int64)x * sz.x) / nsz.x);
+			int32 sx1 = (int32)(((int64)(x + 1) * sz.x) / nsz.x);
+			if (sx1 <= sx0) sx1 = sx0 + 1;
+			if (sx1 > sz.x) sx1 = sz.x;
+
+			uint32 r = 0, g = 0, b = 0, a = 0, n = 0;
+			for (int32 sy = sy0; sy < sy1; sy++)
+			{
+				const unsigned char* row = src + ((size_t)sy * sz.x + (size_t)sx0) * 4;
+				for (int32 sx = sx0; sx < sx1; sx++)
+				{
+					r += row[0]; g += row[1]; b += row[2]; a += row[3];
+					row += 4;
+					n++;
+				}
+			}
+			unsigned char* d = dst + ((size_t)y * nsz.x + (size_t)x) * 4;
+			d[0] = (unsigned char)(r / n); d[1] = (unsigned char)(g / n);
+			d[2] = (unsigned char)(b / n); d[3] = (unsigned char)(a / n);
+		}
+	}
+	return out;
+#else
+	return img;
+#endif
+}
+
 static void AnimationLoader(Vector<FileInfo> files, Ref<ImageAnimation> ia)
 {
 	ia->FrameCount = files.size();
@@ -153,14 +212,14 @@ static void AnimationLoader(Vector<FileInfo> files, Ref<ImageAnimation> ia)
 				ia->FrameData.push_back(std::move(newData));
 			}
 		}
-		ia->NextImage = ImageRes::Create(ia->FrameData[0]);
+		ia->NextImage = ScaleAnimationFrame(ImageRes::Create(ia->FrameData[0]));
 	}
 	else {
 		for (int i = 0; i < ia->FrameCount; i++)
 		{
 			if (ia->Cancelled.load())
 				break;
-			ia->Frames.Add(Graphics::ImageRes::Create(files[i].fullPath));
+			ia->Frames.Add(ScaleAnimationFrame(Graphics::ImageRes::Create(files[i].fullPath)));
 		}
 	}
 	ia->LoadComplete.store(true);
@@ -176,7 +235,7 @@ static void AnimationLoader(Vector<FileInfo> files, Ref<ImageAnimation> ia)
 			{
 				currentFrame = ia->CurrentFrame;
 				int nextFrame = (currentFrame + 1) % ia->FrameCount;
-				Image nextImage = ImageRes::Create(ia->FrameData[nextFrame]);
+				Image nextImage = ScaleAnimationFrame(ImageRes::Create(ia->FrameData[nextFrame]));
 				ia->LoadMutex.lock();
 				ia->NextImage = nextImage;
 				ia->LoadMutex.unlock();
@@ -249,7 +308,12 @@ static int LoadAnimation(lua_State* L, const char* path, float frametime, int lo
 	if (files.empty())
 		return -1;
 
-	int key = nvgCreateImage(g_guiState.vg, *files[0].fullPath, 0);
+	// The GL texture must match the (possibly downscaled) frames that get
+	// uploaded via nvgUpdateImage afterwards, so create it from a scaled
+	// copy of frame 0 instead of the raw file.
+	Ref<ImageRes> firstFrame = ScaleAnimationFrame(ImageRes::Create(files[0].fullPath));
+	Vector2i fsz = firstFrame->GetSize();
+	int key = nvgCreateImageRGBA(g_guiState.vg, fsz.x, fsz.y, 0, (const unsigned char*)firstFrame->GetBits());
 	Ref<ImageAnimation> ia = std::make_shared<ImageAnimation>();
 	ia->Compressed = compressed;
 	ia->TimesToLoop = loopcount;

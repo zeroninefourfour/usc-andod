@@ -23,6 +23,11 @@ public:
 	[[nodiscard]]
 	virtual bool GetTickRate(int32& rate) { return false; };
 
+	// Whether this screen wants touch-zone input mapping (gameplay-style) instead
+	// of plain mouse clicks from touch. Menus return false.
+	[[nodiscard]]
+	virtual bool WantsTouchZones() const { return false; }
+
 	[[nodiscard]]
 	bool IsSuspended() const noexcept { return m_suspended; }
 	[[nodiscard]]

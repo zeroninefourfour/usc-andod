@@ -62,6 +62,8 @@ protected:
 public:
 	virtual ~SongSelect() = default;
 	[[nodiscard]]
+	bool WantsTouchZones() const override { return true; }
+	[[nodiscard]]
 	static SongSelect* Create();
 	[[nodiscard]]
 	static SongSelect* Create(MultiplayerScreen*);

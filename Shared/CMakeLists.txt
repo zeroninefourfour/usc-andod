@@ -47,6 +47,12 @@ target_include_directories(Shared PRIVATE
 target_link_libraries(Shared lua)
 
 target_link_libraries(Shared ${Iconv_LIBRARIES})
+if(ANDROID)
+    # vcpkg arm64-android libiconv.a is a broken host build; use a local stub
+    add_library(iconv_stub STATIC ${CMAKE_CURRENT_SOURCE_DIR}/android/iconv_stub.c)
+    target_link_libraries(Shared iconv_stub)
+    target_include_directories(Shared SYSTEM PRIVATE ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include)
+endif()
 target_include_directories(Shared SYSTEM PRIVATE ${Iconv_INCLUDE_DIRS})
 
 target_link_libraries(Shared ${LibArchive_LIBRARIES})

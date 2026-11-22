@@ -35,6 +35,12 @@
 #include "archive_entry.h"
 #include "LightPlugin/LightPlugin.h"
 
+#ifdef ANDROID
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+#endif
+
 GameConfig g_gameConfig;
 SkinConfig *g_skinConfig;
 OpenGL *g_gl = nullptr;
@@ -939,12 +945,200 @@ void threadedRenderer() {
 }
 
 
+#ifdef ANDROID
+typedef struct SDL_archive_read_data {
+	SDL_RWops* rwops;
+	uint8_t buff[10240];
+} SDL_archive_read;
+
+ssize_t
+sdl_archive_read(struct archive *a, void *client_data, const void **buff)
+{
+  struct SDL_archive_read_data* mydata = (SDL_archive_read_data*)client_data;
+  *buff = mydata->buff;
+  return (SDL_RWread(mydata->rwops, mydata->buff, 1, 10240));
+}
+int
+sdl_archive_close(struct archive *a, void *client_data)
+{
+	struct SDL_archive_read_data* mydata = (SDL_archive_read_data*)client_data;
+	SDL_RWclose(mydata->rwops);
+  	return (ARCHIVE_OK);
+}
+
+static void WarnOrThrow(int code, archive* a, int throw_level)
+{
+	const char* err = archive_error_string(a);
+	if (!err) err = "unknown archive error";
+	if (code < throw_level) throw std::runtime_error(err);
+	if (code < ARCHIVE_OK)
+	{
+		Log(err, Logger::Severity::Warning);
+	}
+}
+
+// Like WarnOrThrow but never throws: extraction should be best-effort, a single
+// bad entry (e.g. an existing symlink) must not crash the game on startup
+static void WarnOnly(int code, archive* a)
+{
+	if (code < ARCHIVE_OK)
+	{
+		const char* err = archive_error_string(a);
+		Log(err ? err : "unknown archive error", Logger::Severity::Warning);
+	}
+}
+
+// Extract the bundled usc.zip (APK assets) to /sdcard/.usc on first run
+bool ExtractAndroidAssets() {
+	Path::gameDir = "/sdcard/.usc";
+	// /sdcard needs "all files access" on Android 11+; if we cannot write there,
+	// fall back to the app-specific external storage dir which always works.
+	if (!Path::IsDirectory(Path::gameDir))
+		Path::CreateDir(Path::gameDir);
+	{
+		String testFile = Path::Absolute(".writetest");
+		FILE* f = fopen(*testFile, "wb");
+		if (f) {
+			fclose(f);
+			Path::Delete(testFile);
+		} else {
+			const char* ext = SDL_AndroidGetExternalStoragePath();
+			if (ext)
+				Path::gameDir = String(ext) + "/.usc";
+			Logf("Cannot write to /sdcard/.usc, falling back to gameDir=%s", Logger::Severity::Warning, *Path::gameDir);
+		}
+	}
+	// Extract the bundled assets if the skin files are missing (gameDir may exist
+	// but be empty, e.g. user created /sdcard/.usc/songs before first run)
+	bool assetDirs = Path::FileExists(Path::Absolute("skins/Default/skin.cfg"));
+	if (!assetDirs) { //no game files, extract from apk assets.
+		SDL_archive_read_data data;
+		data.rwops = SDL_RWFromFile("usc.zip", "rb");
+
+		if (data.rwops != nullptr) {
+			try {
+				struct archive* aSrc = archive_read_new();
+				archive_read_support_format_all(aSrc);
+				archive_read_support_compression_all(aSrc);
+
+				if (int r = archive_read_open(aSrc, &data, NULL, sdl_archive_read, sdl_archive_close))
+				{
+					const char* openErr = archive_error_string(aSrc);
+					archive_read_free(aSrc); // also closes the rwops via sdl_archive_close
+					throw std::runtime_error(openErr ? openErr : "Failed to open the archive.");
+				}
+
+				int flags = 0;
+
+				flags |= ARCHIVE_EXTRACT_TIME;
+				flags |= ARCHIVE_EXTRACT_ACL;
+				flags |= ARCHIVE_EXTRACT_FFLAGS;
+
+				// Keep NODOTDOT for path traversal safety, but allow existing
+				// symlinks in the target dir (users may symlink asset folders)
+				flags |= ARCHIVE_EXTRACT_SECURE_NODOTDOT;
+
+				struct archive* aDst = archive_write_disk_new();
+
+				archive_write_disk_set_options(aDst, flags);
+				archive_write_disk_set_standard_lookup(aDst);
+
+				struct archive_entry* entry = nullptr;
+
+				for (;;)
+				{
+					int r = archive_read_next_header(aSrc, &entry);
+
+					if (r == ARCHIVE_EOF) break;
+					if (r < ARCHIVE_WARN)
+					{
+						WarnOnly(r, aSrc);
+						break;
+					}
+					String entryPath = archive_entry_pathname(entry);
+					// zip entries are prefixed with ".usc/"; map them under gameDir
+					if (entryPath.compare(0, 5, ".usc/") == 0)
+						entryPath = entryPath.substr(5);
+					archive_entry_set_pathname(entry, *Path::Absolute(entryPath));
+					r = archive_write_header(aDst, entry);
+					if (r < ARCHIVE_WARN)
+					{
+						WarnOnly(r, aDst);
+						archive_read_data_skip(aSrc);
+						continue;
+					}
+					if (r == ARCHIVE_OK && archive_entry_size(entry) > 0)
+					{
+						int r;
+						const void* buff;
+						size_t size;
+						la_int64_t offset;
+
+						for (;;) {
+							r = archive_read_data_block(aSrc, &buff, &size, &offset);
+
+							if (r == ARCHIVE_EOF) break;
+							if (r < ARCHIVE_OK)
+							{
+								WarnOnly(r, aSrc);
+								break;
+							}
+
+							r = archive_write_data_block(aDst, buff, size, offset);
+							if (r < ARCHIVE_OK)
+							{
+								WarnOnly(r, aDst);
+								break;
+							}
+						}
+
+						r = archive_write_finish_entry(aDst);
+						WarnOnly(r, aDst);
+					}
+				}
+				archive_read_free(aSrc);
+				archive_write_free(aDst);
+			} catch (const std::exception& e) {
+				Logf("Asset extraction failed: %s", Logger::Severity::Error, e.what());
+			}
+		}
+	} else {
+		return true;
+	}
+
+	return Path::FileExists(Path::Absolute("skins/Default/skin.cfg"));
+}
+#endif // ANDROID
+
 bool Application::m_Init()
 {
 	ProfilerScope $("Application Setup");
 
 	String version = Utility::Sprintf("%d.%d.%d", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
 	Logf("Version: %s", Logger::Severity::Info, version.c_str());
+
+#ifdef ANDROID
+	if (!ExtractAndroidAssets()) {
+		SDL_AndroidShowToast(*Utility::Sprintf("Download and extract game assets to: %s", Path::gameDir), 30000, -1, 0, 0);
+		throw std::runtime_error("No game assets.");
+	}
+	// gameDir is only known now; retry the log file so skins can read log_usc-game.txt
+	Logger::Get().ReopenLogFile();
+
+	// Desktop USC runs with the game root as working directory, and skins rely
+	// on that for relative paths (e.g. LucidWave appends
+	// ";skins/<skin>/textures/_shared/scripts/?.lua" to lua's package.path).
+	// On Android the CWD is the app sandbox, so re-root it to the game dir,
+	// otherwise every relative path used by skins fails to resolve.
+	if (chdir(*Path::gameDir) != 0)
+	{
+		Logf("Failed to change working directory to %s: %s", Logger::Severity::Warning, *Path::gameDir, strerror(errno));
+	}
+	else
+	{
+		Logf("Working directory set to %s", Logger::Severity::Info, *Path::gameDir);
+	}
+#endif
 
 #ifdef EMBEDDED
 	Log("Embeedded version.");
@@ -1113,6 +1307,16 @@ bool Application::m_Init()
 	g_resolution = Vector2i(
 		g_gameConfig.GetInt(GameConfigKeys::ScreenWidth),
 		g_gameConfig.GetInt(GameConfigKeys::ScreenHeight));
+#ifdef ANDROID
+	// SDL on Android ignores the requested window size; use the real display
+	// size so the game adapts to the device (phones/tablets) instead of
+	// rendering into a fixed 1280x720 viewport.
+	{
+		SDL_DisplayMode mode;
+		if (SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.w > 0 && mode.h > 0)
+			g_resolution = Vector2i(mode.w, mode.h);
+	}
+#endif
 	g_aspectRatio = (float)g_resolution.x / (float)g_resolution.y;
 
 	int samplecount = g_gameConfig.GetInt(GameConfigKeys::AntiAliasing);
@@ -1120,6 +1324,17 @@ bool Application::m_Init()
 		samplecount = 1 << samplecount;
 
 	g_gameWindow = new Graphics::Window(g_resolution, samplecount);
+
+#ifdef ANDROID
+	// SDL on Android ignores the requested window size; the real surface size
+	// can differ from the display mode (e.g. 1440x2560 vs 1600x2560), which
+	// would make touch/mouse coordinates drift. Use the actual window size.
+	{
+		Vector2i realSize = g_gameWindow->GetWindowSize();
+		if (realSize.x > 0 && realSize.y > 0)
+			g_resolution = realSize;
+	}
+#endif
 
 	// Versioning up config uses some SDL util functions, so it must be called after SDL is initialized.
 	// SDL is initialized in the constructor of Graphics::Window.
@@ -1335,6 +1550,11 @@ void Application::m_MainLoop()
 		if (restoreTop && !g_tickables.empty())
 			g_tickables.back()->m_Restore();
 
+#ifdef ANDROID
+		// Touch zones only for gameplay-style screens; everywhere else touch is a plain mouse click
+		g_input.SetTouchZonesEnabled(!g_tickables.empty() && !g_tickables.back()->IsSuspended() && g_tickables.back()->WantsTouchZones());
+#endif
+
 		// Application should end, no more active screens
 		if (g_tickableChanges.empty() && g_tickables.empty())
 		{
@@ -1448,6 +1668,84 @@ static void CheckGLErrors(const std::string_view label)
 	}
 }
 
+#ifdef ANDROID
+// Draws the touch zones (button lanes, laser halves, start/back corners) as a
+// translucent overlay so players can see where to touch. Active zones highlight.
+static void RenderTouchOverlay()
+{
+	// Can be turned off for a clean look; the zones keep working regardless
+	if (!g_gameConfig.GetBool(GameConfigKeys::ShowTouchOverlay))
+		return;
+	// Labels depend on the layout: UltimateMobile merges the FX buttons into
+	// the lanes, StandardSDVX has dedicated FX columns and pure BT lanes
+	static const char* ultimateLabels[Input::TZ_Count] = {
+		"A/FX-L", "B/FX-L", "C/FX-R", "D/FX-R",
+		"", "", "LASER L", "LASER R", "START", "BACK"
+	};
+	static const char* standardLabels[Input::TZ_Count] = {
+		"BT-A", "BT-B", "BT-C", "BT-D",
+		"FX-L", "FX-R", "LASER L", "LASER R", "START", "BACK"
+	};
+	const char* const (&zoneLabels)[Input::TZ_Count] =
+		(g_gameConfig.GetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout) == TouchControllerLayouts::StandardSDVX)
+		? standardLabels : ultimateLabels;
+	Input::TouchZoneInfo zones[Input::TZ_Count];
+	int32 n = g_input.GetTouchZoneInfos(zones, Input::TZ_Count);
+	for (int32 i = 0; i < n; i++)
+	{
+		auto& z = zones[i];
+		bool active = g_input.IsTouchZoneActive(z.zoneId);
+		float x = z.x * g_resolution.x;
+		float y = z.y * g_resolution.y;
+		float w = z.w * g_resolution.x;
+		float h = z.h * g_resolution.y;
+
+		NVGcolor fill;
+		if (z.zoneId == Input::TZ_Laser0)
+			fill = active ? nvgRGBA(80, 140, 255, 130) : nvgRGBA(80, 140, 255, 55);
+		else if (z.zoneId == Input::TZ_Laser1)
+			fill = active ? nvgRGBA(255, 90, 90, 130) : nvgRGBA(255, 90, 90, 55);
+		else if (z.zoneId == Input::TZ_Start || z.zoneId == Input::TZ_Back)
+			fill = active ? nvgRGBA(255, 220, 80, 160) : nvgRGBA(255, 220, 80, 80);
+		else
+			fill = active ? nvgRGBA(255, 255, 255, 110) : nvgRGBA(255, 255, 255, 45);
+
+		nvgBeginPath(g_guiState.vg);
+		nvgRect(g_guiState.vg, x, y, w, h);
+		nvgFillColor(g_guiState.vg, fill);
+		nvgFill(g_guiState.vg);
+		nvgStrokeColor(g_guiState.vg, nvgRGBA(255, 255, 255, active ? 230 : 140));
+		nvgStrokeWidth(g_guiState.vg, 3);
+		nvgStroke(g_guiState.vg);
+
+		if (zoneLabels[z.zoneId])
+		{
+			nvgFontFace(g_guiState.vg, "fallback");
+			nvgFontSize(g_guiState.vg, h > 120 ? 42 : 24);
+			nvgTextAlign(g_guiState.vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+			nvgFillColor(g_guiState.vg, nvgRGBA(255, 255, 255, 190));
+			nvgText(g_guiState.vg, x + w / 2, y + h / 2, zoneLabels[z.zoneId], nullptr);
+		}
+	}
+
+	// One dot per held finger, so multi-touch is visible (works in menus too)
+	float pts[Input::MAX_TOUCHES * 2];
+	int32 np = g_input.GetActiveTouchPoints(pts, Input::MAX_TOUCHES);
+	for (int32 i = 0; i < np; i++)
+	{
+		float x = pts[i * 2] * g_resolution.x;
+		float y = pts[i * 2 + 1] * g_resolution.y;
+		nvgBeginPath(g_guiState.vg);
+		nvgCircle(g_guiState.vg, x, y, 26);
+		nvgFillColor(g_guiState.vg, nvgRGBA(255, 255, 255, 90));
+		nvgFill(g_guiState.vg);
+		nvgStrokeColor(g_guiState.vg, nvgRGBA(255, 255, 255, 210));
+		nvgStrokeWidth(g_guiState.vg, 3);
+		nvgStroke(g_guiState.vg);
+	}
+}
+#endif
+
 void Application::RenderTickables()
 {
 	//Clear out opengl errors
@@ -1500,6 +1798,20 @@ void Application::RenderTickables()
 	}
 	nvgEndFrame(g_guiState.vg);
 	m_renderQueueBase.Process();
+#ifdef ANDROID
+	// Draw the touch overlay in a fresh nanovg frame AFTER everything the skin
+	// queued has been processed. Two reasons:
+	// 1) Skins draw with gfx.Translate/Scale and regularly leave a non-identity
+	//    nvg transform behind (no ResetTransform/ForceRender at the end). A fresh
+	//    nvgBeginFrame resets it, otherwise the overlay inherits the transform
+	//    and its scale/position drifts per screen.
+	// 2) Lua draws recorded after the skin's last ForceRender are only uploaded
+	//    by Process(), i.e. after the overlay, which covered/pushed it back
+	//    behind e.g. gameplay intro graphics (the "appears late" effect).
+	nvgBeginFrame(g_guiState.vg, g_resolution.x, g_resolution.y, 1);
+	RenderTouchOverlay();
+	nvgEndFrame(g_guiState.vg);
+#endif
 	glCullFace(GL_FRONT);
 
 	CheckGLErrors("after processing render queues");
@@ -1760,12 +2072,31 @@ Material Application::LoadMaterial(const String &name, const String &path)
 	pathF = Path::Absolute(pathF);
 	pathG = Path::Absolute(pathG);
 	Material ret = MaterialRes::Create(g_gl, pathV, pathF);
+	// Skins don't have to ship the full shader set (or the folder may be broken,
+	// e.g. a nested extraction); fall back to the Default skin's shaders so a
+	// missing file doesn't kill the material and pop a "Shader Error" box.
+	if (!ret && Path::Absolute(path).compare(Path::Absolute("skins/Default/shaders/")) != 0)
+	{
+		Logf("Shaders %s missing in skin, falling back to skin Default",
+			Logger::Severity::Warning, pathV);
+		return LoadMaterial(name, "skins/Default/shaders/");
+	}
 	// Additionally load geometry shader
-	if (Path::FileExists(pathG))
+	if (ret && Path::FileExists(pathG))
 	{
 		Shader gshader = ShaderRes::Create(g_gl, ShaderType::Geometry, pathG);
-		assert(gshader);
-		ret->AssignShader(ShaderType::Geometry, gshader);
+		if (gshader)
+		{
+			ret->AssignShader(ShaderType::Geometry, gshader);
+		}
+		else
+		{
+			// Geometry shaders need a GLES 3.2 context (GLSL ES 320); on older
+			// contexts (or on compile failure) degrade to plain vs/fs instead
+			// of failing the whole material
+			Logf("Geometry shader %s unavailable on this GL context, using vs/fs only",
+				Logger::Severity::Warning, pathG);
+		}
 	}
 	if (!ret)
 		g_gameWindow->ShowMessageBox("Shader Error", "Could not load shaders "+path+name+".vs and "+path+name+".fs", 0);
@@ -1784,12 +2115,11 @@ Sample Application::LoadSample(const String &name, const bool &external)
 	else
 		path = Path::Absolute(String("skins/") + m_skin + String("/audio/") + name);
 
-#ifndef ANDROID // I don't know why this is not working on android
+	// Path::Normalize is a no-op on Android, but extension appending is pure string ops and works fine
 	path = Path::Normalize(path);
 	String ext = Path::GetExtension(path);
 	if (ext.empty())
 		path += ".wav";
-#endif
 
 	Sample ret = g_audio->CreateSample(path);
 	//assert(ret);
@@ -1879,8 +2209,13 @@ int Application::CreateImage(const String& path, int imageFlags)
 void Application::SetScriptPath(lua_State *s)
 {
 	//Set path for 'require' (https://stackoverflow.com/questions/4125971/setting-the-global-lua-path-variable-from-c-c?lq=1)
+#ifdef ANDROID
+	// Path::Normalize is a no-op on Android and the "./" prefix breaks require
+	String lua_path = Path::Absolute("skins/" + m_skin + "/scripts/?.lua;") + Path::Absolute("skins/" + m_skin + "/scripts/?");
+#else
 	String lua_path = Path::Normalize(
 		Path::Absolute("./skins/" + m_skin + "/scripts/?.lua;") + Path::Absolute("./skins/" + m_skin + "/scripts/?"));
+#endif
 
 	lua_getglobal(s, "package");
 	lua_getfield(s, -1, "path");				// get field "path" from table at top of stack (-1)
@@ -2271,8 +2606,14 @@ void Application::m_OnKeyReleased(SDL_Scancode code, int32 delta)
 		break;
 	}
 }
-void Application::m_OnWindowResized(const Vector2i &newSize)
+void Application::m_OnWindowResized(const Vector2i &newSizeIn)
 {
+	Vector2i newSize = newSizeIn;
+#ifdef ANDROID
+	// On Android the real size is the window size SDL reports (the display mode
+	// can differ, e.g. 1440x2560 vs 1600x2560, which would make touch drift).
+	// newSize already is the actual window size here.
+#endif
 	if (g_gameConfig.GetBool(GameConfigKeys::ForcePortrait))
 	{
 		Vector2i tempsize = newSize; //do this because on startup g_resolution is the reference newSize
@@ -2414,6 +2755,36 @@ static int lGetMousePos(lua_State *L)
 	float left = g_gameWindow->GetWindowSize().x / 2 - g_resolution.x / 2;
 	lua_pushnumber(L, pos.x - left);
 	lua_pushnumber(L, pos.y);
+	return 2;
+}
+
+// Native multi-touch support for skins (works on every screen, menus included).
+// Returns the number of currently held fingers.
+static int lGetTouchCount(lua_State *L)
+{
+	float pts[Input::MAX_TOUCHES * 2];
+	int32 n = g_input.GetActiveTouchPoints(pts, Input::MAX_TOUCHES);
+	lua_pushinteger(L, n);
+	return 1;
+}
+
+// Position of held finger 'index' (0-based, in lGetTouchCount order),
+// in the same screen coordinates as game.GetMousePos().
+// Returns nil when the index is out of range.
+static int lGetTouchPos(lua_State *L /*int index*/)
+{
+	int32 index = (int32)luaL_checkinteger(L, 1);
+	float pts[Input::MAX_TOUCHES * 2];
+	int32 n = g_input.GetActiveTouchPoints(pts, Input::MAX_TOUCHES);
+	if (index < 0 || index >= n)
+	{
+		lua_pushnil(L);
+		return 1;
+	}
+	Vector2i wndSize = g_gameWindow->GetWindowSize();
+	float left = wndSize.x / 2 - g_resolution.x / 2.0f;
+	lua_pushnumber(L, pts[index * 2] * wndSize.x - left);
+	lua_pushnumber(L, pts[index * 2 + 1] * wndSize.y);
 	return 2;
 }
 
@@ -2941,6 +3312,8 @@ void Application::SetLuaBindings(lua_State *state)
 	{
 		lua_newtable(state);
 		pushFuncToTable("GetMousePos", lGetMousePos);
+		pushFuncToTable("GetTouchCount", lGetTouchCount);
+		pushFuncToTable("GetTouchPos", lGetTouchPos);
 		pushFuncToTable("GetResolution", lGetResolution);
 		pushFuncToTable("Log", lLog);
 		pushFuncToTable("LoadSkinSample", lLoadSkinSample);

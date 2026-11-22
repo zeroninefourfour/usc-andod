@@ -56,6 +56,10 @@ public:
 	// Sets the log level, logs for >= level
 	void SetLogLevel(Logger::Severity level);
 
+	// Retry opening the log file (useful on Android where the game dir is only
+	// known after the logger is constructed)
+	void ReopenLogFile();
+
 private:
 	class Logger_Impl* m_impl;
 };

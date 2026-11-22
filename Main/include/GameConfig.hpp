@@ -137,6 +137,10 @@ DefineEnum(GameConfigKeys,
 		   ExitPlayMethod,
 		   ExitPlayHoldDuration,
 		   DisableNonButtonInputsDuringPlay, // TODO: after enabling key customization for non-button commands, remove this.
+		   TouchControllerLayout, // Android: layout of the gameplay touch zones
+		   ShowTouchOverlay,     // Android: draw the on-screen touch zone overlay
+		   TouchLaserMode,       // Android: how touch drives the lasers
+		   TouchButtonVibration, // Android: haptic pulse on touch button presses
 
 		   LastSelected,
 		   LastSelectedChal,
@@ -279,6 +283,14 @@ DefineEnum(ButtonComboModeSettings,
 		   Disabled,
 		   Hold,
 		   Instant)
+
+DefineEnum(TouchControllerLayouts,
+		   UltimateMobile, // 4 lanes, each lane merges its side's FX button (smart routed)
+		   StandardSDVX)   // 4 pure BT lanes with FX-L / FX-R strips below them
+
+DefineEnum(TouchLaserModes,
+		   Absolute, // swipe-follow: finger x maps to the laser position
+		   Relative) // trackpad: finger movement deltas move the laser
 
 DefineEnum(QualityLevel,
            Off,

@@ -35,7 +35,7 @@ target_include_directories(Audio PRIVATE
     ${SRCROOT}
     ${INCROOT}
     ${PCHROOT}
-    ${SDL_INCLUDE_DIR}
+    ${SDL2_INCLUDE_DIR}
 )
 
 #set_werror(Audio)
@@ -59,7 +59,7 @@ target_link_libraries(Audio ${ANDROID_NDK_PLATFORM}/libOpenSLES.so)
 target_link_libraries(Audio soundtouch)
 target_link_libraries(Audio minimp3)
 target_link_libraries(Audio miniaudio)
-target_link_libraries(Audio SDL2)
+target_link_libraries(Audio SDL2::SDL2)
 
 
 target_link_libraries(Audio cc-common)

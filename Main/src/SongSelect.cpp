@@ -160,6 +160,24 @@ public:
 			lua_settable(m_lua, -3);
 		}
 		lua_setglobal(m_lua, "songwheel");
+
+		// Lua -> C++ bridge: set_index is only a one-way C++ -> Lua notify, so
+		// skin-side input (touch scrolling) needs a way to drive the actual
+		// selection. Lua indices are 1-based (m_SetLuaItemIndex passes
+		// m_currentlySelectedLuaSortIndex + 1), which is the same index space.
+		lua_newtable(m_lua);
+		lua_pushstring(m_lua, "select");
+		lua_pushlightuserdata(m_lua, this);
+		lua_pushcclosure(m_lua, [](lua_State *L)
+		{
+			SelectionWheel *self = (SelectionWheel *)lua_touserdata(L, lua_upvalueindex(1));
+			lua_Integer index = luaL_checkinteger(L, 1);
+			if (index >= 1)
+				self->SelectItemBySortIndex((uint32)(index - 1));
+			return 0;
+		}, 1);
+		lua_settable(m_lua, -3);
+		lua_setglobal(m_lua, "songwheelctl");
 		return true;
 	}
 	void ReloadScript() override

@@ -32,7 +32,17 @@ public:
 #endif
 
 		// Log to file
+		OpenLogFile();
+	}
+
+	void OpenLogFile()
+	{
+#ifdef ANDROID
+		// Skins expect the log at log_usc-game.txt (module name is the .so name on Android)
+		String logPath = Path::Absolute("log_usc-game.txt");
+#else
 		String logPath = Path::Absolute(Utility::Sprintf("log_%s.txt", moduleName));
+#endif
 		if (!m_logFile.OpenWrite(logPath, false, true))
 		{
 			m_failedToOpen = true;
@@ -40,6 +50,14 @@ public:
 		}
 		m_failedToOpen = false;
 		m_writer = FileWriter(m_logFile);
+	}
+
+	// Retry opening the log file (e.g. once the game dir is known on Android)
+	void ReopenLogFile()
+	{
+		if (!m_failedToOpen)
+			return;
+		OpenLogFile();
 	}
 
 	void Lock()
@@ -180,6 +198,10 @@ void Logger::Write(const String& msg)
 void Logger::SetLogLevel(Logger::Severity level)
 {
 	m_impl->SetLogLevel(level);
+}
+void Logger::ReopenLogFile()
+{
+	m_impl->ReopenLogFile();
 }
 void Log(const String& msg, Logger::Severity severity)
 {

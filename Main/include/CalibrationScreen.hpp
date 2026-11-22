@@ -17,6 +17,8 @@ public:
 	void Render(float deltaTime) override;
 	void Tick(float deltaTime) override;
 	bool GetTickRate(int32& rate) override;
+	[[nodiscard]]
+	bool WantsTouchZones() const override { return true; }
 
 private:
 	Timer m_timer;

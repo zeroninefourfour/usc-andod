@@ -21,6 +21,8 @@ NK_API void                 nk_sdl_font_stash_begin(struct nk_font_atlas **atlas
 NK_API void                 nk_sdl_font_stash_end(void);
 NK_API int                  nk_sdl_handle_event(SDL_Event *evt);
 NK_API void                 nk_sdl_render(enum nk_anti_aliasing , int max_vertex_buffer, int max_element_buffer);
+/* Desktop: no UI scaling, provided for source compatibility with the GLES2 backend */
+NK_API void                 nk_sdl_set_ui_scale(float scale);
 NK_API void                 nk_sdl_shutdown(void);
 NK_API void                 nk_sdl_device_destroy(void);
 NK_API void                 nk_sdl_device_create(void);
@@ -65,6 +67,12 @@ static struct nk_sdl {
     struct nk_context ctx;
     struct nk_font_atlas atlas;
 } sdl;
+
+/* Desktop: UI scaling is not used, no-op for source compatibility */
+void nk_sdl_set_ui_scale(float scale)
+{
+    (void)scale;
+}
 
 #ifdef __APPLE__
   #define NK_SHADER_VERSION "#version 150\n"

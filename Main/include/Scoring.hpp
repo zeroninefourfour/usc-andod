@@ -105,6 +105,13 @@ public:
 	// Needs to be set to handle input
 	void SetInput(Input* input);
 
+	// Smart-routing helper for merged touch lane presses: returns whether
+	// firing this button right now would be judged (hit window / hold pickup)
+	// or is harmless (empty queue), instead of stealing an upcoming note by
+	// pressing it more than 'good' early (judged as an instant miss).
+	[[nodiscard]]
+	bool ShouldFireButton(Input::Button b) const;
+
 	void SetOptions(PlaybackOptions opts);
 	void SetEndTime(MapTime time);
 

@@ -43,6 +43,8 @@ public:
 
 	virtual ~Game() = default;
 	[[nodiscard]]
+	bool WantsTouchZones() const override { return true; }
+	[[nodiscard]]
 	static Game* Create(ChartIndex* chart, PlayOptions&& options);
 	[[nodiscard]]
 	static Game* Create(MultiplayerScreen*, ChartIndex* chart, PlayOptions&& options);

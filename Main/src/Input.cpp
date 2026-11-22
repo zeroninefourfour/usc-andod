@@ -2,6 +2,34 @@
 #include "Input.hpp"
 #include "GameConfig.hpp"
 
+#ifdef ANDROID
+#include <jni.h>
+#include <SDL_system.h>
+
+// Short haptic pulse for touch button feedback, routed through the activity
+// (com.tutorial.game.HelloSDL2Activity.hapticVibrate) which owns the Vibrator
+// service on Android. Called on the SDL event thread; on any failure (no
+// vibrator, JNI trouble) it silently does nothing.
+static void TouchButtonHaptic()
+{
+	if (!g_gameConfig.GetBool(GameConfigKeys::TouchButtonVibration))
+		return;
+	JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+	jobject activity = (jobject)SDL_AndroidGetActivity();
+	if (!env || !activity)
+		return;
+	jclass clazz = env->GetObjectClass(activity);
+	if (clazz)
+	{
+		jmethodID method = env->GetStaticMethodID(clazz, "hapticVibrate", "(I)V");
+		if (method)
+			env->CallStaticVoidMethod(clazz, method, (jint)15);
+		env->DeleteLocalRef(clazz);
+	}
+	env->DeleteLocalRef(activity);
+}
+#endif
+
 Input::~Input()
 {
 	// Shoud be set to null by Cleanup
@@ -16,7 +44,22 @@ void Input::Init(Graphics::Window& wnd)
 	m_window->OnKeyPressed.Add(this, &Input::OnKeyPressed);
 	m_window->OnKeyReleased.Add(this, &Input::OnKeyReleased);
 	m_window->OnMouseMotion.Add(this, &Input::OnMouseMotion);
+	m_window->OnTouchDown.Add(this, &Input::OnTouchDown);
+	m_window->OnTouchMove.Add(this, &Input::OnTouchMove);
+	m_window->OnTouchUp.Add(this, &Input::OnTouchUp);
+	m_window->OnFocusChanged.Add(this, &Input::OnFocusChanged);
 
+	memset(m_touchFingerIds, 0, sizeof(m_touchFingerIds));
+	memset(m_touchActive, 0, sizeof(m_touchActive));
+	memset(m_touchButton, 0xff, sizeof(m_touchButton));
+	memset(m_touchButtonAlt, 0xff, sizeof(m_touchButtonAlt));
+	memset(m_touchZone, 0xff, sizeof(m_touchZone));
+	memset(m_touchLaser, 0xff, sizeof(m_touchLaser));
+	memset(m_touchLastX, 0, sizeof(m_touchLastX));
+	memset(m_touchLastY, 0, sizeof(m_touchLastY));
+	m_touchLaserActive[0] = m_touchLaserActive[1] = false;
+	m_touchLaserTarget[0] = m_touchLaserTarget[1] = 0.0f;
+	m_touchLaserEst[0] = m_touchLaserEst[1] = 0.0f;
 
 	m_lastMousePos[0] = m_window->GetMousePos().x;
 	m_lastMousePos[1] = m_window->GetMousePos().y;
@@ -120,6 +163,10 @@ void Input::Cleanup()
 		m_window->OnKeyPressed.RemoveAll(this);
 		m_window->OnKeyReleased.RemoveAll(this);
 		m_window->OnMouseMotion.RemoveAll(this);
+		m_window->OnTouchDown.RemoveAll(this);
+		m_window->OnTouchMove.RemoveAll(this);
+		m_window->OnTouchUp.RemoveAll(this);
+		m_window->OnFocusChanged.RemoveAll(this);
 		m_window = nullptr;
 	}
 }
@@ -136,6 +183,12 @@ void Input::Update(float deltaTime)
 		it++;
 	}
 
+#ifdef ANDROID
+	// Touch-driven: always keep absolute mouse mode so emulated touch clicks
+	// land at the correct position (laser input comes from touch zones instead)
+	if (m_window->GetRelativeMouseMode())
+		m_window->SetRelativeMouseMode(false);
+#else
 	if(!m_mouseLocks.empty())
 	{
 		if (!m_window->GetRelativeMouseMode())
@@ -145,8 +198,11 @@ void Input::Update(float deltaTime)
 	{
 		m_window->SetRelativeMouseMode(false);
 	}
+#endif
 
-	if(m_laserDevice == InputDevice::Mouse)
+	// While real touches are active, ignore the mouse (touch->mouse emulation would
+	// otherwise feed phantom laser movement when tapping buttons)
+	if(m_laserDevice == InputDevice::Mouse && m_activeTouchCount == 0)
 	{
 		for(uint32 i = 0; i < 2; i++)
 		{
@@ -215,6 +271,19 @@ void Input::Update(float deltaTime)
 				}
 				m_prevLaserStates[i] = axisState;
 			}
+		}
+	}
+
+	// Touch laser input overrides other devices while a finger is held on a laser
+	// zone. Swipe-follow logic (SDVX Ultimate Mobile style): the finger's x maps
+	// absolutely to the laser position, the laser chases it at a capped speed.
+	for (uint32 i = 0; i < 2; i++)
+	{
+		if (m_touchLaserActive[i])
+		{
+			float d = Math::Clamp((m_touchLaserTarget[i] - m_touchLaserEst[i]) * 10.0f, -0.3f, 0.3f);
+			m_laserStates[i] = d;
+			m_touchLaserEst[i] += d;
 		}
 	}
 
@@ -471,4 +540,447 @@ void Input::OnMouseMotion(int32 x, int32 y)
 {
 	m_mousePos[0] += x;
 	m_mousePos[1] += y;
+}
+
+int32 Input::m_FindTouchSlot(int64 fingerId) const
+{
+	for (int32 i = 0; i < MAX_TOUCHES; i++)
+	{
+		if (m_touchActive[i] && m_touchFingerIds[i] == fingerId)
+			return i;
+	}
+	return -1;
+}
+
+void Input::m_ReleaseAllTouches()
+{
+	for (int32 i = 0; i < MAX_TOUCHES; i++)
+	{
+		if (!m_touchActive[i])
+			continue;
+		if (m_touchButton[i] >= 0)
+			m_OnButtonInput((Button)m_touchButton[i], false, 0);
+		if (m_touchButtonAlt[i] >= 0)
+			m_OnButtonInput((Button)m_touchButtonAlt[i], false, 0);
+		m_touchActive[i] = false;
+		m_touchButton[i] = -1;
+		m_touchButtonAlt[i] = -1;
+		m_touchZone[i] = -1;
+		m_touchLaser[i] = -1;
+	}
+	m_touchLaserActive[0] = m_touchLaserActive[1] = false;
+	m_activeTouchCount = 0;
+}
+
+void Input::OnFocusChanged(bool focused)
+{
+	m_focused = focused;
+	// On focus loss SDL may never deliver FINGERUP for held fingers; without this
+	// the stale slots would swallow the next touches (multi-touch "breaking")
+	if (!focused)
+	{
+		Logf("Touch: focus lost, releasing %d held touch(es)", Logger::Severity::Info, m_activeTouchCount);
+		m_ReleaseAllTouches();
+	}
+}
+
+float Input::CritLineY(int32 wndW, int32 wndH)
+{
+	// Portrait: crit line at ~0.75 of height, buttons below it. Landscape: ~0.95.
+	return (wndH > wndW) ? 0.76f : 0.86f;
+}
+
+int32 Input::ZoneAt(float x, float y, float critY)
+{
+	// Top corners: Start (right) / Back (left)
+	if (y < 0.08f)
+	{
+		if (x > 0.8f)
+			return TZ_Start;
+		if (x < 0.2f)
+			return TZ_Back;
+	}
+	// Button console below the crit line
+	if (y > critY)
+	{
+		// StandardSDVX: 4 BT lanes on top, FX-L/FX-R strips below (FX-L spans
+		// under A+B, FX-R under C+D)
+		if (g_gameConfig.GetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout) == TouchControllerLayouts::StandardSDVX)
+		{
+			const float bandH = 1.0f - critY;
+			if (y > critY + bandH * 0.7f)
+				return (x < 0.5f) ? TZ_FX0 : TZ_FX1;
+			float t = Math::Clamp((x - 0.1f) / 0.8f, 0.0f, 0.999999f);
+			return (int32)(t * 4.0f); // TZ_Lane0..TZ_Lane3
+		}
+		// UltimateMobile: 4 big lanes across the middle 80%
+		float t = Math::Clamp((x - 0.1f) / 0.8f, 0.0f, 0.999999f);
+		return (int32)(t * 4.0f); // TZ_Lane0..TZ_Lane3
+	}
+	// Laser zone: left half controls laser 0, right half controls laser 1
+	return (x < 0.5f) ? TZ_Laser0 : TZ_Laser1;
+}
+
+Input::Button Input::ZoneButton(int32 zoneId)
+{
+	// UltimateMobile screen order: [BT-A+FX-L], [BT-B+FX-L], [BT-C+FX-R], [BT-D+FX-R]
+	static const Button lanes[4] = { Button::BT_0, Button::BT_1, Button::BT_2, Button::BT_3 };
+	if (zoneId >= TZ_Lane0 && zoneId <= TZ_Lane3)
+		return lanes[zoneId];
+	if (zoneId == TZ_FX0)
+		return Button::FX_0;
+	if (zoneId == TZ_FX1)
+		return Button::FX_1;
+	if (zoneId == TZ_Start)
+		return Button::BT_S;
+	return Button::Back;
+}
+Input::Button Input::ZoneButtonAlt(int32 zoneId)
+{
+	// Merged FX button only exists in the UltimateMobile layout: A/B double as
+	// FX-L, C/D as FX-R; StandardSDVX lanes are pure BT with dedicated FX zones
+	if (zoneId >= TZ_Lane0 && zoneId <= TZ_Lane3 &&
+		g_gameConfig.GetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout) == TouchControllerLayouts::UltimateMobile)
+	{
+		if (zoneId == TZ_Lane0 || zoneId == TZ_Lane1)
+			return Button::FX_0;
+		return Button::FX_1;
+	}
+	return Button::Length;
+}
+
+void Input::ZoneRect(int32 zoneId, float critY, float& x, float& y, float& w, float& h)
+{
+	switch (zoneId)
+	{
+		case TZ_Start: x = 0.8f; y = 0.0f; w = 0.2f; h = 0.08f; break;
+		case TZ_Back:  x = 0.0f; y = 0.0f; w = 0.2f; h = 0.08f; break;
+		case TZ_Laser0: x = 0.0f; y = 0.08f; w = 0.5f; h = critY - 0.08f; break;
+		case TZ_Laser1: x = 0.5f; y = 0.08f; w = 0.5f; h = critY - 0.08f; break;
+		default: // button console (full console height)
+			if (g_gameConfig.GetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout) == TouchControllerLayouts::StandardSDVX)
+			{
+				// 4 BT lanes on top of the console band, FX strips below:
+				// FX-L spans under A+B, FX-R under C+D
+				const float bandH = 1.0f - critY;
+				if (zoneId == TZ_FX0)
+				{
+					x = 0.1f; y = critY + bandH * 0.7f; w = 0.4f; h = bandH * 0.3f;
+				}
+				else if (zoneId == TZ_FX1)
+				{
+					x = 0.5f; y = critY + bandH * 0.7f; w = 0.4f; h = bandH * 0.3f;
+				}
+				else
+				{
+					// lanes share the UltimateMobile x positions
+					x = 0.1f + zoneId * (0.8f / 4.0f); w = 0.8f / 4.0f;
+					y = critY; h = bandH * 0.7f;
+				}
+			}
+			else
+			{
+				// 4 lanes across the middle 80%
+				x = 0.1f + zoneId * (0.8f / 4.0f); w = 0.8f / 4.0f;
+				y = critY; h = 1.0f - critY;
+			}
+			break;
+	}
+}
+
+void Input::SetTouchZonesEnabled(bool enabled)
+{
+	if (m_touchZonesEnabled == enabled)
+		return;
+	m_touchZonesEnabled = enabled;
+	if (!enabled)
+		m_ReleaseAllTouches(); // release everything any held finger was pressing
+}
+
+void Input::SetTouchButtonFireFilter(std::function<bool(Button)> filter)
+{
+	m_touchFireFilter = filter;
+}
+
+int32 Input::GetTouchZoneInfos(TouchZoneInfo* out, int32 maxZones) const
+{
+	if (!m_window)
+		return 0;
+	Vector2i wndSize = m_window->GetWindowSize();
+	float critY = CritLineY(wndSize.x, wndSize.y);
+	int32 n = 0;
+	const bool standardLayout = g_gameConfig.GetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout) == TouchControllerLayouts::StandardSDVX;
+	for (int32 z = 0; z < TZ_Count && n < maxZones; z++)
+	{
+		// Start/Back corners are always shown; the rest only in gameplay screens
+		if (!m_touchZonesEnabled && z != TZ_Start && z != TZ_Back)
+			continue;
+		// Dedicated FX zones only exist in the StandardSDVX layout
+		if ((z == TZ_FX0 || z == TZ_FX1) && !standardLayout)
+			continue;
+		out[n].zoneId = z;
+		ZoneRect(z, critY, out[n].x, out[n].y, out[n].w, out[n].h);
+		n++;
+	}
+	return n;
+}
+
+int32 Input::GetActiveTouchPoints(float* outXY, int32 maxPoints) const
+{
+	int32 n = 0;
+	for (int32 i = 0; i < MAX_TOUCHES && n < maxPoints; i++)
+	{
+		if (m_touchActive[i])
+		{
+			outXY[n * 2] = m_touchLastX[i];
+			outXY[n * 2 + 1] = m_touchLastY[i];
+			n++;
+		}
+	}
+	return n;
+}
+
+bool Input::IsTouchZoneActive(int32 zoneId) const
+{
+	if (zoneId == TZ_Laser0)
+		return m_touchLaserActive[0];
+	if (zoneId == TZ_Laser1)
+		return m_touchLaserActive[1];
+	// Match by zone, not by button: lanes A/B share FX-L (and C/D FX-R), so
+	// button matching would light the neighbouring lane up too
+	for (int32 i = 0; i < MAX_TOUCHES; i++)
+	{
+		if (m_touchActive[i] && m_touchZone[i] == zoneId)
+			return true;
+	}
+	return false;
+}
+
+// Assigns a touch slot to the zone at (x, y) and presses the zone's button(s).
+// Shared by OnTouchDown and the ghost-release recovery path in OnTouchMove.
+void Input::m_AssignZone(int32 slot, float x, float y)
+{
+	Vector2i wndSize = m_window->GetWindowSize();
+	float critY = CritLineY(wndSize.x, wndSize.y);
+	int32 zone = ZoneAt(x, y, critY);
+	m_touchZone[slot] = zone; // for zone-accurate overlay highlighting
+
+	// Start/Back corners work everywhere (menus included), so touch-only users
+	// can always confirm/back out
+	if (zone == TZ_Start || zone == TZ_Back)
+	{
+		Button b = ZoneButton(zone);
+		m_touchButton[slot] = (int32)b;
+		m_OnButtonInput(b, true, 0);
+#ifdef ANDROID
+		TouchButtonHaptic();
+#endif
+		return;
+	}
+
+	if (!m_touchZonesEnabled)
+		return; // menus: touch is handled as mouse clicks by SDL emulation
+
+	if (zone == TZ_Laser0 || zone == TZ_Laser1)
+	{
+		// Laser zone. Absolute (swipe-follow): the finger's x position maps
+		// absolutely to the laser position (half the screen = full laser
+		// range). Relative (trackpad): touch-down keeps the laser where it is
+		// and OnTouchMove accumulates finger deltas into the target.
+		int32 laser = zone - TZ_Laser0;
+		m_touchLaser[slot] = laser;
+		m_touchLaserActive[laser] = true;
+		if (g_gameConfig.GetEnum<Enum_TouchLaserModes>(GameConfigKeys::TouchLaserMode) != TouchLaserModes::Relative)
+		{
+			m_touchLaserTarget[laser] = (x < 0.5f) ? Math::Clamp(x * 2.0f, 0.0f, 1.0f)
+			                                       : Math::Clamp((x - 0.5f) * 2.0f, 0.0f, 1.0f);
+			m_touchLaserEst[laser] = m_touchLaserTarget[laser];
+		}
+	}
+	else
+	{
+		// Button lane; every lane merges its FX button (A/B -> FX-L, C/D -> FX-R).
+		// Smart routing: when gameplay scoring installed the fire filter, each
+		// merged button is only fired if it would be judged right now (hit
+		// window / hold pickup / idle press). A button whose next note is still
+		// more than 'good' early is suppressed instead: the engine judges such
+		// a press as an instant miss, which would make a BT tap steal and kill
+		// the side's upcoming FX note (and vice versa). The suppressed button
+		// stays free, so a later lane tap can still judge its own note fresh.
+		Button b = ZoneButton(zone);
+		Button bAlt = ZoneButtonAlt(zone);
+		if (m_touchFireFilter)
+		{
+			if (bAlt != Button::Length && !m_touchFireFilter(bAlt))
+				bAlt = Button::Length;
+			if (b != Button::Length && !m_touchFireFilter(b))
+				b = Button::Length;
+		}
+		if (b != Button::Length)
+		{
+			m_touchButton[slot] = (int32)b;
+			m_OnButtonInput(b, true, 0);
+		}
+		if (bAlt != Button::Length)
+		{
+			m_touchButtonAlt[slot] = (int32)bAlt;
+			m_OnButtonInput(bAlt, true, 0);
+		}
+#ifdef ANDROID
+		// One pulse per tap even when BT and FX fired together; suppressed
+		// (smart-routed) buttons stay silent so a blocked tap feels blocked
+		if (b != Button::Length || bAlt != Button::Length)
+			TouchButtonHaptic();
+#endif
+	}
+}
+
+void Input::OnTouchDown(int64 fingerId, float x, float y)
+{
+	// Always track the finger (native multi-touch), even in menus where it only
+	// acts as a mouse click via SDL's touch->mouse emulation
+	int32 slot = m_FindTouchSlot(fingerId);
+	if (slot >= 0)
+	{
+		// already tracked (duplicate DOWN): just refresh the position
+		m_touchLastX[slot] = x;
+		m_touchLastY[slot] = y;
+		return;
+	}
+	{
+		for (int32 i = 0; i < MAX_TOUCHES; i++)
+		{
+			if (!m_touchActive[i])
+			{
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 0)
+			return;
+		m_touchActive[slot] = true;
+		m_touchFingerIds[slot] = fingerId;
+		m_activeTouchCount++;
+	}
+
+	m_touchLastX[slot] = x;
+	m_touchLastY[slot] = y;
+	m_touchButton[slot] = -1;
+	m_touchButtonAlt[slot] = -1;
+	m_touchZone[slot] = -1;
+	m_touchLaser[slot] = -1;
+
+	m_AssignZone(slot, x, y);
+}
+
+void Input::OnTouchMove(int64 fingerId, float x, float y)
+{
+	int32 slot = m_FindTouchSlot(fingerId);
+	if (slot < 0)
+	{
+		// Ghost-release recovery ("dropped touch"): when several fingers land at
+		// once, some digitizers/systems emit a spurious ACTION_POINTER_UP (or
+		// cancel a subset of the gesture) for a finger that is still physically
+		// on the screen. OnTouchUp then freed its slot and released its button
+		// while Android keeps sending MOVE for that fingerId. Since Android
+		// never sends MOVE after a real lift, a MOVE for an unknown id proves the
+		// finger is still down: re-allocate the slot and re-press its zone so
+		// the hold recovers instead of staying dead until the player re-taps.
+		if (!m_touchZonesEnabled || !m_focused)
+			return;
+		for (int32 i = 0; i < MAX_TOUCHES; i++)
+		{
+			if (!m_touchActive[i])
+			{
+				slot = i;
+				break;
+			}
+		}
+		if (slot < 0)
+			return;
+		m_touchActive[slot] = true;
+		m_touchFingerIds[slot] = fingerId;
+		m_activeTouchCount++;
+		m_touchButton[slot] = -1;
+		m_touchButtonAlt[slot] = -1;
+		m_touchZone[slot] = -1;
+		m_touchLaser[slot] = -1;
+		m_touchLastX[slot] = x;
+		m_touchLastY[slot] = y;
+		m_AssignZone(slot, x, y);
+		Logf("Touch: re-acquired phantom-released finger %lld at (%.2f, %.2f)",
+			Logger::Severity::Info, (long long)fingerId, x, y);
+		return;
+	}
+
+	if (m_touchZonesEnabled && m_touchLaser[slot] >= 0)
+	{
+		int32 laser = m_touchLaser[slot];
+		if (g_gameConfig.GetEnum<Enum_TouchLaserModes>(GameConfigKeys::TouchLaserMode) == TouchLaserModes::Relative)
+		{
+			// Trackpad: accumulate the finger's x delta into the laser target.
+			// Scale 2.0 matches the absolute mapping, so the same physical
+			// swipe distance covers the same laser distance.
+			m_touchLaserTarget[laser] = Math::Clamp(
+				m_touchLaserTarget[laser] + (x - m_touchLastX[slot]) * 2.0f, 0.0f, 1.0f);
+		}
+		else
+		{
+			// Swipe-follow: finger x maps absolutely to the laser target position
+			m_touchLaserTarget[laser] = (x < 0.5f) ? Math::Clamp(x * 2.0f, 0.0f, 1.0f)
+			                                       : Math::Clamp((x - 0.5f) * 2.0f, 0.0f, 1.0f);
+		}
+	}
+	m_touchLastX[slot] = x;
+	m_touchLastY[slot] = y;
+}
+
+void Input::OnTouchUp(int64 fingerId, float x, float y)
+{
+	int32 slot = m_FindTouchSlot(fingerId);
+	if (slot < 0)
+	{
+		// Normally means a previous FINGERDOWN was lost (event flood) or focus
+		// loss already released everything; log in gameplay so it is traceable
+		if (m_touchZonesEnabled)
+			Logf("Touch: FINGERUP for untracked finger %lld", Logger::Severity::Info, (long long)fingerId);
+		return;
+	}
+
+	// Only release a button if no other finger is still holding the same one
+	auto stillHeld = [&](int32 btn) {
+		for (int32 i = 0; i < MAX_TOUCHES; i++)
+		{
+			if (i != slot && m_touchActive[i] && (m_touchButton[i] == btn || m_touchButtonAlt[i] == btn))
+				return true;
+		}
+		return false;
+	};
+	if (m_touchButton[slot] >= 0 && !stillHeld(m_touchButton[slot]))
+		m_OnButtonInput((Button)m_touchButton[slot], false, 0);
+	if (m_touchButtonAlt[slot] >= 0 && !stillHeld(m_touchButtonAlt[slot]))
+		m_OnButtonInput((Button)m_touchButtonAlt[slot], false, 0);
+	if (m_touchLaser[slot] >= 0)
+	{
+		int32 laser = m_touchLaser[slot];
+		// Only deactivate the laser if no other finger is still on it
+		bool stillUsed = false;
+		for (int32 i = 0; i < MAX_TOUCHES; i++)
+		{
+			if (i != slot && m_touchActive[i] && m_touchLaser[i] == laser)
+			{
+				stillUsed = true;
+				break;
+			}
+		}
+		if (!stillUsed)
+			m_touchLaserActive[laser] = false;
+	}
+
+	m_touchActive[slot] = false;
+	m_touchButton[slot] = -1;
+	m_touchButtonAlt[slot] = -1;
+	m_touchZone[slot] = -1;
+	m_touchLaser[slot] = -1;
+	m_activeTouchCount--;
 }

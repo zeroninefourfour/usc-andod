@@ -24,6 +24,11 @@ NK_API void                 nk_sdl_font_stash_begin(struct nk_font_atlas **atlas
 NK_API void                 nk_sdl_font_stash_end(void);
 NK_API int                  nk_sdl_handle_event(SDL_Event *evt);
 NK_API void                 nk_sdl_render(enum nk_anti_aliasing , int max_vertex_buffer, int max_element_buffer);
+/* Runtime UI scale for the nuklear pass: layout space is window/scale pixels
+ * (used on Android phones where the fixed ~720p design would look tiny).
+ * Must be set while the GUI uses it (e.g. SettingsPageCollection) and restored
+ * to 1.0f afterwards so other nuklear GUIs are unaffected. */
+NK_API void                 nk_sdl_set_ui_scale(float scale);
 NK_API void                 nk_sdl_shutdown(void);
 NK_API void                 nk_sdl_device_destroy(void);
 NK_API void                 nk_sdl_device_create(void);
@@ -70,6 +75,18 @@ static struct nk_sdl {
     struct nk_context ctx;
     struct nk_font_atlas atlas;
 } sdl;
+
+/* Current UI scale for the nuklear pass (layout space = window pixels / scale).
+ * 1.0f = unscaled (default). See nk_sdl_set_ui_scale. */
+static float nk_sdl__ui_scale = 1.0f;
+
+NK_API void
+nk_sdl_set_ui_scale(float scale)
+{
+    if (scale <= 0.0f)
+        scale = 1.0f;
+    nk_sdl__ui_scale = scale;
+}
 
 
 #define NK_SHADER_VERSION "#version 100\n"
@@ -185,8 +202,10 @@ nk_sdl_render(enum nk_anti_aliasing AA, int max_vertex_buffer, int max_element_b
     };
     SDL_GetWindowSize(sdl.win, &width, &height);
     SDL_GL_GetDrawableSize(sdl.win, &display_width, &display_height);
-    ortho[0][0] /= (GLfloat)width;
-    ortho[1][1] /= (GLfloat)height;
+    /* Layout space is (width, height)/ui_scale; the ortho maps that onto the
+     * window so everything drawn in layout pixels scales up by ui_scale. */
+    ortho[0][0] /= ((GLfloat)width / nk_sdl__ui_scale);
+    ortho[1][1] /= ((GLfloat)height / nk_sdl__ui_scale);
 
     scale.x = (float)display_width/(float)width;
     scale.y = (float)display_height/(float)height;
@@ -268,10 +287,11 @@ nk_sdl_render(enum nk_anti_aliasing AA, int max_vertex_buffer, int max_element_b
         nk_draw_foreach(cmd, &sdl.ctx, &dev->cmds) {
             if (!cmd->elem_count) continue;
             glBindTexture(GL_TEXTURE_2D, (GLuint)cmd->texture.id);
-            glScissor((GLint)(cmd->clip_rect.x * scale.x),
-                (GLint)((height - (GLint)(cmd->clip_rect.y + cmd->clip_rect.h)) * scale.y),
-                (GLint)(cmd->clip_rect.w * scale.x),
-                (GLint)(cmd->clip_rect.h * scale.y));
+            /* clip rects are in layout pixels, convert to window pixels */
+            glScissor((GLint)(cmd->clip_rect.x * nk_sdl__ui_scale * scale.x),
+                (GLint)((height - ((cmd->clip_rect.y + cmd->clip_rect.h) * nk_sdl__ui_scale)) * scale.y),
+                (GLint)(cmd->clip_rect.w * nk_sdl__ui_scale * scale.x),
+                (GLint)(cmd->clip_rect.h * nk_sdl__ui_scale * scale.y));
             glDrawElements(GL_TRIANGLES, (GLsizei)cmd->elem_count, GL_UNSIGNED_SHORT, offset);
             offset += cmd->elem_count;
         }
@@ -400,7 +420,7 @@ nk_sdl_handle_event(SDL_Event *evt)
     } else if (evt->type == SDL_MOUSEBUTTONDOWN || evt->type == SDL_MOUSEBUTTONUP) {
         /* mouse button */
         int down = evt->type == SDL_MOUSEBUTTONDOWN;
-        const int x = evt->button.x, y = evt->button.y;
+        const int x = (int)(evt->button.x / nk_sdl__ui_scale), y = (int)(evt->button.y / nk_sdl__ui_scale);
         if (evt->button.button == SDL_BUTTON_LEFT) {
             if (evt->button.clicks > 1)
                 nk_input_button(ctx, NK_BUTTON_DOUBLE, x, y, down);
@@ -414,8 +434,8 @@ nk_sdl_handle_event(SDL_Event *evt)
         /* mouse motion */
         if (ctx->input.mouse.grabbed) {
             int x = (int)ctx->input.mouse.prev.x, y = (int)ctx->input.mouse.prev.y;
-            nk_input_motion(ctx, x + evt->motion.xrel, y + evt->motion.yrel);
-        } else nk_input_motion(ctx, evt->motion.x, evt->motion.y);
+            nk_input_motion(ctx, x + (int)(evt->motion.xrel / nk_sdl__ui_scale), y + (int)(evt->motion.yrel / nk_sdl__ui_scale));
+        } else nk_input_motion(ctx, (int)(evt->motion.x / nk_sdl__ui_scale), (int)(evt->motion.y / nk_sdl__ui_scale));
         return 1;
     } else if (evt->type == SDL_TEXTINPUT) {
         /* text input */

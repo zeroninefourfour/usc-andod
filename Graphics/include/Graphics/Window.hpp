@@ -157,6 +157,10 @@ namespace Graphics
 		Delegate<MouseButton> OnMousePressed;
 		Delegate<MouseButton> OnMouseReleased;
 		Delegate<int32, int32> OnMouseMotion;
+		// Touch events: fingerId, normalized x (0..1, left to right), normalized y (0..1, top to bottom)
+		Delegate<int64, float, float> OnTouchDown;
+		Delegate<int64, float, float> OnTouchMove;
+		Delegate<int64, float, float> OnTouchUp;
 		Delegate<SDL_Event> OnAnyEvent;
 		// Mouse scroll wheel 
 		//	Positive for scroll down

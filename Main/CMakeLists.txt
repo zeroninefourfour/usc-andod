@@ -46,7 +46,7 @@ source_group("" FILES ${PCH_FILES})
 # Compiler stuff
 enable_precompiled_headers("${MAIN_SRC}" ${PCH_SRC})
 
-include_directories(Audio GUI ${SDL_INCLUDE_DIR} .)
+include_directories(Audio GUI ${SDL2_INCLUDE_DIR} .)
 add_library(usc-game SHARED ${MAIN_SRC} ${RESOURCE_SRC} ${PCH_FILES})
 target_include_directories(usc-game PRIVATE
     ${SRCROOT}
@@ -98,9 +98,9 @@ target_link_libraries(usc-game nlohmann_json)
 
 target_link_libraries(usc-game BackbeatIntegration sqlite3)
 
-target_link_libraries(usc-game SDL2 ${SDL2_LIBRARY})
+target_link_libraries(usc-game SDL2::SDL2 ${SDL2_LIBRARY})
 if(ANDROID)
-    target_link_libraries(usc-game ${ANDROID_NDK_PLATFORM}/liblog.so)
+    target_link_libraries(usc-game ${ANDROID_NDK_PLATFORM}/liblog.so ${ANDROID_NDK_PLATFORM}/libandroid.so ${ANDROID_NDK_PLATFORM}/libdl.so)
 endif()
 target_link_libraries(usc-game ${LibArchive_LIBRARIES})
 target_include_directories(usc-game SYSTEM PRIVATE ${LibArchive_INCLUDE_DIRS})

@@ -142,6 +142,10 @@ void GameConfig::InitDefaults()
 	// Input settings
 	SetEnum<Enum_InputDevice>(GameConfigKeys::ButtonInputDevice, InputDevice::Keyboard);
 	SetEnum<Enum_InputDevice>(GameConfigKeys::LaserInputDevice, InputDevice::Keyboard);
+	SetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout, TouchControllerLayouts::UltimateMobile);
+	Set(GameConfigKeys::ShowTouchOverlay, true);
+	SetEnum<Enum_TouchLaserModes>(GameConfigKeys::TouchLaserMode, TouchLaserModes::Absolute);
+	Set(GameConfigKeys::TouchButtonVibration, true);
 	SetEnum<Enum_ButtonComboModeSettings>(GameConfigKeys::UseBackCombo, ButtonComboModeSettings::Hold);
 	SetEnum<Enum_LaserAxisOption>(GameConfigKeys::InvertLaserInput, LaserAxisOption::None);
 
@@ -361,6 +365,10 @@ ConfigBase::KeyList GameConfigProfileSettings = {
 	Key(Mouse_Laser0Axis),
 	Key(Mouse_Laser1Axis),
 	Key(Mouse_Sensitivity),
+	Key(TouchControllerLayout),
+	Key(ShowTouchOverlay),
+	Key(TouchLaserMode),
+	Key(TouchButtonVibration),
 
 	Key(LaserInputDevice),
 	Key(ButtonInputDevice),

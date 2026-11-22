@@ -5,6 +5,18 @@
 
 constexpr static int NK_PROPERTY_DEFAULT = 0;
 
+float SettingsUIScale()
+{
+#ifdef ANDROID
+	// Layout space is window pixels / scale. Basing the scale on the shorter
+	// window edge keeps the UI proportional in both portrait and landscape.
+	const Vector2i windowSize = g_gameWindow->GetWindowSize();
+	return Math::Clamp(Math::Min((float)windowSize.x, (float)windowSize.y) / 720.0f, 1.0f, 2.5f);
+#else
+	return 1.0f;
+#endif
+}
+
 static inline void nk_sdl_text(nk_flags event)
 {
 	if (event & NK_EDIT_ACTIVATED)
@@ -436,6 +448,7 @@ protected:
 bool SettingsPageCollection::Init()
 {
 	BasicNuklearGui::Init();
+	m_uiScale = SettingsUIScale();
 	InitPages();
 	InitStyles();
 
@@ -465,12 +478,21 @@ void SettingsPageCollection::Tick(float deltaTime)
 		return;
 	}
 
+	m_uiScale = SettingsUIScale();
+
 	if (m_enableSwitchPageOnHover)
 	{
-		ProcessTabHandleMouseHover(g_gameWindow->GetMousePos());
+		// Events are queued in window pixels; convert to the scaled layout space
+		ProcessTabHandleMouseHover(Vector2i(
+			(int)(g_gameWindow->GetMousePos().x / m_uiScale),
+			(int)(g_gameWindow->GetMousePos().y / m_uiScale)));
 	}
 
+	// Scale nuklear input (window pixels -> layout pixels) while this GUI
+	// processes events; other nuklear GUIs keep the unscaled default.
+	nk_sdl_set_ui_scale(m_uiScale);
 	BasicNuklearGui::Tick(deltaTime);
+	nk_sdl_set_ui_scale(1.0f);
 }
 
 void SettingsPageCollection::Render(float deltaTime)
@@ -481,13 +503,22 @@ void SettingsPageCollection::Render(float deltaTime)
 	}
 
 	m_forcePortrait = g_gameConfig.GetBool(GameConfigKeys::ForcePortrait);
+	m_uiScale = SettingsUIScale();
 
 	NVGcontext* vg = g_application->GetVGContext();
 
 	nvgBeginFrame(vg, static_cast<float>(g_resolution.x), static_cast<float>(g_resolution.y), 1.0f);
+	// Everything inside RenderPages() works in layout pixels (window/m_uiScale)
+	if (m_uiScale != 1.0f)
+	{
+		nvgScale(vg, m_uiScale, m_uiScale);
+	}
 	RenderPages();
 
+	// Render the nuklear pass with the same scale (ortho + scissor)
+	nk_sdl_set_ui_scale(m_uiScale);
 	BasicNuklearGui::NKRender();
+	nk_sdl_set_ui_scale(1.0f);
 
 	nvgEndFrame(vg);
 	g_application->GetRenderQueueBase()->Process();
@@ -605,10 +636,17 @@ void SettingsPageCollection::InitPages()
 
 void SettingsPageCollection::UpdatePageRegions()
 {
-	const float SETTINGS_DESIRED_CONTENTS_WIDTH = g_resolution.y / 1.4f;
+	/* All regions are computed in layout pixels = window pixels / m_uiScale.
+	 * The nuklear GL pass and the nvg draws scale them back up to the window,
+	 * so on high-res screens the UI keeps its (design-sized) proportions but
+	 * fills the screen instead of turning into a tiny thumbnail. */
+	const float layoutX = static_cast<float>(g_resolution.x) / m_uiScale;
+	const float layoutY = static_cast<float>(g_resolution.y) / m_uiScale;
+
+	const float SETTINGS_DESIRED_CONTENTS_WIDTH = layoutY / 1.4f;
 	const float SETTINGS_DESIRED_HEADERS_WIDTH = 100.0f;
 
-	const float SETTINGS_WIDTH = Math::Min(SETTINGS_DESIRED_CONTENTS_WIDTH + SETTINGS_DESIRED_HEADERS_WIDTH, g_resolution.x - 5.0f);
+	const float SETTINGS_WIDTH = Math::Min(SETTINGS_DESIRED_CONTENTS_WIDTH + SETTINGS_DESIRED_HEADERS_WIDTH, layoutX - 5.0f);
 	const float SETTINGS_CONTENTS_WIDTH = Math::Max(SETTINGS_WIDTH * 0.85f, SETTINGS_WIDTH - SETTINGS_DESIRED_HEADERS_WIDTH);
 	const float SETTINGS_HEADERS_WIDTH = SETTINGS_WIDTH - SETTINGS_CONTENTS_WIDTH;
 
@@ -618,19 +656,20 @@ void SettingsPageCollection::UpdatePageRegions()
 		return;
 	}
 
-	float SETTINGS_OFFSET_X = (g_resolution.x - SETTINGS_WIDTH) / 2;
+	float SETTINGS_OFFSET_X = (layoutX - SETTINGS_WIDTH) / 2;
 	if (m_forcePortrait)
 	{
-		SETTINGS_OFFSET_X += (g_gameWindow->GetWindowSize().x - g_resolution.x) / 2;
+		// window-pixels offset converted into layout pixels
+		SETTINGS_OFFSET_X += ((static_cast<float>(g_gameWindow->GetWindowSize().x) - static_cast<float>(g_resolution.x)) / 2.0f) / m_uiScale;
 	}
 
 	const float SETTINGS_CONTENTS_OFFSET_X = SETTINGS_OFFSET_X + SETTINGS_HEADERS_WIDTH;
 
-	m_pageContentRegion = { SETTINGS_CONTENTS_OFFSET_X, 0, SETTINGS_CONTENTS_WIDTH, (float)g_resolution.y };
+	m_pageContentRegion = { SETTINGS_CONTENTS_OFFSET_X, 0, SETTINGS_CONTENTS_WIDTH, layoutY };
 
 	m_pageButtonHeight = Math::Clamp(m_pageContentRegion.h / (2 + m_pages.size()), static_cast<float>(PAGE_NAME_SIZE), 40.0f);
 
-	float pageHeaderSpacing = Math::Max(0.0f, static_cast<float>(g_resolution.y) - m_pageButtonHeight * (2 + m_pages.size()));
+	float pageHeaderSpacing = Math::Max(0.0f, layoutY - m_pageButtonHeight * (2 + m_pages.size()));
 
 	const float PAGE_HEADER_SPACING_TOP = Math::Min(pageHeaderSpacing * 0.1f, m_pageButtonHeight * 0.5f);
 	pageHeaderSpacing -= PAGE_HEADER_SPACING_TOP;
@@ -640,7 +679,7 @@ void SettingsPageCollection::UpdatePageRegions()
 
 	m_pageHeaderRegion = { SETTINGS_OFFSET_X, PAGE_HEADER_SPACING_TOP, SETTINGS_HEADERS_WIDTH, PAGE_HEADER_SPACING_TOP + m_pageButtonHeight * m_pages.size() };
 
-	const float PAGE_HEADER_BOTTOM = static_cast<float>(g_resolution.y) - Math::Max(0.0f, pageHeaderSpacing);
+	const float PAGE_HEADER_BOTTOM = layoutY - Math::Max(0.0f, pageHeaderSpacing);
 
 	m_profileButtonRegion = { SETTINGS_OFFSET_X, PAGE_HEADER_BOTTOM - m_pageButtonHeight*2, SETTINGS_HEADERS_WIDTH, m_pageButtonHeight };
 	m_exitButtonRegion = { SETTINGS_OFFSET_X, PAGE_HEADER_BOTTOM - m_pageButtonHeight, SETTINGS_HEADERS_WIDTH, m_pageButtonHeight };
@@ -658,11 +697,14 @@ static inline bool HitCheck(const struct nk_rect& rect, const Vector2i& pos)
 	return rect.x <= pos.x && pos.x < rect.x + rect.w && rect.y <= pos.y && pos.y < rect.y + rect.h;
 }
 
-static inline void RenderButton(NVGcontext* vg, const struct nk_rect& rect, bool forcePortrait, Ref<TextRes> textRes, bool activated, const Vector2i& mousePos)
+static inline void RenderButton(NVGcontext* vg, const struct nk_rect& rect, bool forcePortrait, float uiScale, Ref<TextRes> textRes, bool activated, const Vector2i& mousePos)
 {
 	float scaleX = 1.0f;
 
+	// nvgResetTransform wipes the frame's base scale, re-apply the UI scale
+	// (the base transform from SettingsPageCollection::Render is Scale(uiScale))
 	nvgResetTransform(vg);
+	nvgScale(vg, uiScale, uiScale);
 	if (forcePortrait)
 	{
 		scaleX = static_cast<float>(g_resolution.x) / g_gameWindow->GetWindowSize().x;
@@ -699,6 +741,11 @@ static inline void RenderButton(NVGcontext* vg, const struct nk_rect& rect, bool
 	{
 		transform = Transform::Scale(Vector2(scaleX, 1.0f)) * transform;
 	}
+	// Match the nvg base scale so text follows the scaled UI
+	if (uiScale != 1.0f)
+	{
+		transform = Transform::Scale(Vector2(uiScale)) * transform;
+	}
 
 	g_application->GetRenderQueueBase()->Draw(transform, textRes, g_application->GetFontMaterial(), params);
 }
@@ -707,17 +754,19 @@ void SettingsPageCollection::RenderPageHeaders()
 {
 	NVGcontext* vg = g_application->GetVGContext();
 
-	const Vector2i mousePos = g_gameWindow->GetMousePos();
+	// Window pixels -> layout pixels
+	const Vector2i mouse = g_gameWindow->GetMousePos();
+	const Vector2i mousePos = { (int)(mouse.x / m_uiScale), (int)(mouse.y / m_uiScale) };
 
 	for (size_t i = 0; i+1 < m_pages.size(); ++i)
 	{
 		const struct nk_rect rect = { m_pageHeaderRegion.x, m_pageHeaderRegion.y + i * m_pageButtonHeight, m_pageHeaderRegion.w, m_pageButtonHeight };
 
-		RenderButton(vg, rect, m_forcePortrait, m_pageNames[i], m_currPage == i, mousePos);
+		RenderButton(vg, rect, m_forcePortrait, m_uiScale, m_pageNames[i], m_currPage == i, mousePos);
 	}
 
-	RenderButton(vg, m_profileButtonRegion, m_forcePortrait, *(m_pageNames.rbegin()), false, mousePos);
-	RenderButton(vg, m_exitButtonRegion, m_forcePortrait, m_exitText, false, mousePos);
+	RenderButton(vg, m_profileButtonRegion, m_forcePortrait, m_uiScale, *(m_pageNames.rbegin()), false, mousePos);
+	RenderButton(vg, m_exitButtonRegion, m_forcePortrait, m_uiScale, m_exitText, false, mousePos);
 }
 
 void SettingsPageCollection::RenderPageContents()
@@ -775,7 +824,9 @@ void SettingsPageCollection::OnMousePressed(MouseButton button)
 		return;
 	}
 
-	const Vector2i mousePos = g_gameWindow->GetMousePos();
+	// Regions are in layout pixels, mouse position is in window pixels
+	const Vector2i mouse = g_gameWindow->GetMousePos();
+	const Vector2i mousePos = { (int)(mouse.x / m_uiScale), (int)(mouse.y / m_uiScale) };
 
 	if (HitCheck(m_exitButtonRegion, mousePos))
 	{

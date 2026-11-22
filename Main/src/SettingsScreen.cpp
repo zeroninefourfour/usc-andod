@@ -145,7 +145,7 @@ protected:
 			}
 		}
 
-		LayoutRowDynamic(2, m_lineHeight * 6);
+		LayoutRowDynamic(2, m_lineHeight * 12);
 
 		if (nk_group_begin(m_nctx, "Button Input", NK_WINDOW_NO_SCROLLBAR))
 		{
@@ -153,6 +153,11 @@ protected:
 			EnumSetting<Enum_InputDevice>(GameConfigKeys::ButtonInputDevice, "Button input mode:");
 			IntSetting(GameConfigKeys::InputBounceGuard, "Bounce guard:", 0, 100);
 			EnumSetting<Enum_ButtonComboModeSettings>(GameConfigKeys::UseBackCombo, "Use 3xBT+Start for Back:");
+#ifdef ANDROID
+			EnumSetting<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout, "Touch controller layout:");
+			ToggleSetting(GameConfigKeys::ShowTouchOverlay, "Show touch zone overlay");
+			ToggleSetting(GameConfigKeys::TouchButtonVibration, "Vibrate on touch button press");
+#endif
 
 			nk_group_end(m_nctx);
 		}
@@ -160,6 +165,9 @@ protected:
 		{
 			LayoutRowDynamic(1);
 			EnumSetting<Enum_InputDevice>(GameConfigKeys::LaserInputDevice, "Laser input mode:");
+#ifdef ANDROID
+			EnumSetting<Enum_TouchLaserModes>(GameConfigKeys::TouchLaserMode, "Touch laser mode:");
+#endif
 
 			if (g_gameConfig.GetEnum<Enum_InputDevice>(GameConfigKeys::LaserInputDevice) == InputDevice::Mouse)
 			{
@@ -1483,7 +1491,7 @@ public:
 
 		prompt += " for " + m_keyName + ".";
 
-		g_application->FastText(prompt, static_cast<float>(g_resolution.x / 2), static_cast<float>(g_resolution.y / 2), 40, NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
+		g_application->FastText(prompt, static_cast<float>(g_resolution.x / 2), static_cast<float>(g_resolution.y / 2), (int)(40 * SettingsUIScale()), NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
 	}
 
 	void OnButtonPressed(uint8 key, int32 delta)
@@ -1618,18 +1626,19 @@ public:
 			}
 
 
-			g_application->FastText("Turn left knob one revolution clockwise", center.x, center.y, 40, NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
-			g_application->FastText("then press start.", center.x, center.y + 45, 40, NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
+			const float uiScale = SettingsUIScale();
+			g_application->FastText("Turn left knob one revolution clockwise", center.x, center.y, (int)(40 * uiScale), NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
+			g_application->FastText("then press start.", center.x, center.y + (int)(45 * uiScale), (int)(40 * uiScale), NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
 			if (g_gameConfig.GetEnum<Enum_InputDevice>(GameConfigKeys::LaserInputDevice) == InputDevice::Mouse)
-				g_application->FastText(Utility::Sprintf("Current Sens: %.2f, ppr: (%.0f)", sens, fabs(m_delta)), center.x, center.y + 90, 40, NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
+				g_application->FastText(Utility::Sprintf("Current Sens: %.2f, ppr: (%.0f)", sens, fabs(m_delta)), center.x, center.y + (int)(90 * uiScale), (int)(40 * uiScale), NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
 			else
-				g_application->FastText(Utility::Sprintf("Current Sens: %.2f", sens), center.x, center.y + 90, 40, NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);	
+				g_application->FastText(Utility::Sprintf("Current Sens: %.2f", sens), center.x, center.y + (int)(90 * uiScale), (int)(40 * uiScale), NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
 
 		}
 		else
 		{
 			m_delta = 0;
-			g_application->FastText("Press start twice", center.x, center.y, 40, NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
+			g_application->FastText("Press start twice", center.x, center.y, (int)(40 * SettingsUIScale()), NVGalign::NVG_ALIGN_CENTER | NVGalign::NVG_ALIGN_MIDDLE);
 		}
 	}
 

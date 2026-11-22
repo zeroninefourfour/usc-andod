@@ -95,7 +95,30 @@ void Scoring::SetInput(Input* input)
 		m_input = input;
 		m_input->OnButtonPressed.Add(this, &Scoring::m_OnButtonPressed);
 		m_input->OnButtonReleased.Add(this, &Scoring::m_OnButtonReleased);
+		// Smart routing for merged touch lanes (see Input::SetTouchButtonFireFilter)
+		m_input->SetTouchButtonFireFilter([this](Input::Button b) { return ShouldFireButton(b); });
 	}
+}
+
+bool Scoring::ShouldFireButton(Input::Button b) const
+{
+	const uint32 buttonCode = (uint32)b;
+	if (buttonCode >= 6)
+		return true; // not a merge-relevant button (shouldn't happen)
+	if (autoplayInfo.IsAutoplayButtons() || m_replay != nullptr)
+		return true; // no player button input anyway
+
+	const auto& ticks = m_ticks[buttonCode];
+	if (ticks.empty())
+		return true; // idle press, judged as Idle hit and harmless; keeps hold pre-press working
+	const ScoreTick* front = ticks.front();
+	if (front->HasFlag(TickFlags::Hold))
+		return true; // presses never kill a hold: they either get picked up or are a no-op
+	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+	const MapTime delta = currentTime - front->time;
+	if (delta < 0 && -delta > hitWindow.good)
+		return false; // pressing this early would instantly kill the note (m_ConsumeTick -> m_TickMiss)
+	return true; // in the hit window or already late (judged now / auto-miss imminent)
 }
 void Scoring::SetOptions(PlaybackOptions opts)
 {
@@ -111,6 +134,7 @@ void Scoring::m_CleanupInput()
 	{
 		m_input->OnButtonPressed.RemoveAll(this);
 		m_input->OnButtonReleased.RemoveAll(this);
+		m_input->SetTouchButtonFireFilter(nullptr);
 		m_input = nullptr;
 	}
 }

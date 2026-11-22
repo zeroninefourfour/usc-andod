@@ -94,6 +94,74 @@ namespace Graphics
 			glDeleteProgramPipelines(1, &m_pipeline);
 			#endif
 		}
+#ifdef EMBEDDED
+		// Re-applies uniform initializer defaults that the ES shader translator
+		// stripped from the GLSL source (desktop skins declare default values with
+		// "uniform int x = 1;", which GLSL ES 100 does not support)
+		void ApplyUniformInitializerDefault(const char* name, uint32 type, uint32 loc)
+		{
+			// Find a matching default among all assigned shaders
+			const ShaderUniformDefault* def = nullptr;
+			for (Shader& shader : m_shaders)
+			{
+				if (!shader.get())
+					continue;
+				for (const ShaderUniformDefault& d : shader->GetUniformDefaults())
+				{
+					if (d.name == name)
+					{
+						def = &d;
+						break;
+					}
+				}
+				if (def)
+					break;
+			}
+			if (!def)
+				return;
+
+			GLint prevProgram = 0;
+			glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+			glUseProgram(m_program);
+			switch (type)
+			{
+			case GL_FLOAT:
+				glUniform1f(loc, (GLfloat)def->GetComponent(0));
+				break;
+			case GL_FLOAT_VEC2:
+				glUniform2f(loc, (GLfloat)def->GetComponent(0), (GLfloat)def->GetComponent(1));
+				break;
+			case GL_FLOAT_VEC3:
+				glUniform3f(loc, (GLfloat)def->GetComponent(0), (GLfloat)def->GetComponent(1), (GLfloat)def->GetComponent(2));
+				break;
+			case GL_FLOAT_VEC4:
+				glUniform4f(loc, (GLfloat)def->GetComponent(0), (GLfloat)def->GetComponent(1),
+					(GLfloat)def->GetComponent(2), (GLfloat)def->GetComponent(3));
+				break;
+			case GL_INT:
+			case GL_BOOL:
+				glUniform1i(loc, (GLint)def->GetComponent(0));
+				break;
+			case GL_INT_VEC2:
+			case GL_BOOL_VEC2:
+				glUniform2i(loc, (GLint)def->GetComponent(0), (GLint)def->GetComponent(1));
+				break;
+			case GL_INT_VEC3:
+			case GL_BOOL_VEC3:
+				glUniform3i(loc, (GLint)def->GetComponent(0), (GLint)def->GetComponent(1), (GLint)def->GetComponent(2));
+				break;
+			case GL_INT_VEC4:
+			case GL_BOOL_VEC4:
+				glUniform4i(loc, (GLint)def->GetComponent(0), (GLint)def->GetComponent(1),
+					(GLint)def->GetComponent(2), (GLint)def->GetComponent(3));
+				break;
+			default:
+				break; // samplers, matrices etc. cannot have initializers
+			}
+			glUseProgram((GLuint)prevProgram);
+		}
+#endif
+
 		void AssignShader(ShaderType t, Shader shader) override
 		{
 			m_shaders[(size_t)t] = shader;
@@ -132,6 +200,10 @@ namespace Graphics
 				uint32 loc = glGetUniformLocation(handle, name);
 				#endif
 				m_uniforms.Add(name);
+#ifdef EMBEDDED
+				if ((int32)loc >= 0)
+					ApplyUniformInitializerDefault(name, type, loc);
+#endif
 				// Select type
 				uint32 textureID = 0;
 				String typeName = "Unknown";

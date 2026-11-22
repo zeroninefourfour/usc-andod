@@ -1,6 +1,14 @@
 #pragma once
 #include "GuiUtils.hpp"
 
+/* UI scale for nuklear-based settings GUIs.
+ * The settings UI is laid out in fixed ~720p "design" pixels (24px fonts,
+ * 30px rows); on a high-resolution phone screen that renders as a tiny
+ * thumbnail. This scale lets the GUI render in a smaller layout space and
+ * scales the nuklear pass (projection/scissor/input) and the nvg-drawn bits
+ * accordingly. Desktop stays at 1.0f. (Defined in SettingsPage.cpp.) */
+float SettingsUIScale();
+
 class SettingsPage
 {
 public:
@@ -178,6 +186,10 @@ protected:
 private:
 	bool m_forceReload = false;
 	bool m_forcePortrait = false;
+
+	/* UI scale (Android: >1 for high-res phone screens). Layout space =
+	 * window pixels / m_uiScale; see SettingsUIScale(). */
+	float m_uiScale = 1.0f;
 
 private:
 	void InitStyles();
