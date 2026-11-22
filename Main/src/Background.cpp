@@ -70,6 +70,8 @@ protected:
 	LuaBindable *bindable = nullptr;
 	LuaBindable *trackBindable = nullptr;
 	String folderPath;
+	String chartFolder;
+	Ref<ChartSource> chartSource;
 	lua_State *lua = nullptr;
 	Vector3 timing;
 	Vector2 tilt;
@@ -80,14 +82,30 @@ class TestBackground : public FullscreenBackground
 private:
 	bool m_init(String path)
 	{
-		if (luaL_dofile(lua, Path::Normalize(path + ".lua").c_str()))
+		return m_init(Resource::FromPath(Path::Normalize(path + ".lua")), Resource::FromPath(path + ".fs"));
+	}
+
+	bool m_init(const Resource& script, const Resource& fragmentShader)
+	{
+		int loadResult;
+		if (script.IsPath())
+			loadResult = luaL_dofile(lua, script.GetPath().c_str());
+		else if (script.IsValid())
+		{
+			const Ref<Buffer>& bytes = script.GetBytes();
+			loadResult = luaL_loadbuffer(lua, (const char*)bytes->data(), bytes->size(), script.GetName().c_str());
+			if (loadResult == 0)
+				loadResult = lua_pcall(lua, 0, LUA_MULTRET, 0);
+		}
+		else
+			return false;
+		if (loadResult != 0)
 		{
 			Logf("Lua error: %s", Logger::Severity::Warning, lua_tostring(lua, -1));
 			return false;
 		}
-		String matPath = path + ".fs";
 
-		CheckedLoad(fullscreenMaterial = LoadBackgroundMaterial(matPath));
+		CheckedLoad(fullscreenMaterial = LoadBackgroundMaterial(fragmentShader));
 		fullscreenMaterial->opaque = false;
 
 		if (fullscreenMaterial->HasUniform("texFrameBuffer"))
@@ -205,19 +223,33 @@ public:
 		}
 		else
 		{
-			//if skin doesn't have it, try loading from chart folder
-			folderPath = game->GetChartRootPath() + Path::sep +
-						 layer +
-						 Path::sep;
-			folderPath = Path::Absolute(folderPath);
+			chartSource = game->GetChartSource();
+			chartFolder = layer + "/";
+			ChartIndex* chart = game->GetChartIndex();
+			folderPath = chart
+				? g_application->RegisterChartResource(*chart, chartFolder)
+				: chartSource->ResolvePath(chartFolder).GetPath();
+			if (!folderPath.empty() && folderPath.back() != '/' && folderPath.back() != '\\')
+			{
+				folderPath += Path::sep;
+			}
+			Resource script = chartSource->ResolvePath(chartFolder + fname + ".lua");
+			Resource fragmentShader = chartSource->ResolvePath(chartFolder + fname + ".fs");
+			if (m_init(script, fragmentShader))
+				return true;
 		}
 
-		String path = Path::Normalize(folderPath + fname);
-		if (m_init(path))
-			return true;
+		if (!chartSource)
+		{
+			String path = Path::Normalize(folderPath + fname);
+			if (m_init(path))
+				return true;
+		}
 
 		Logf("Failed to load %s at path: \"%s\" Attempting to load fallback instead.", Logger::Severity::Warning, foreground ? "foreground" : "background", folderPath);
-		path = Path::Absolute("skins/" + skin + "/backgrounds/fallback/");
+		chartSource.reset();
+		chartFolder = "";
+		String path = Path::Absolute("skins/" + skin + "/backgrounds/fallback/");
 		folderPath = path;
 		path = Path::Normalize(path + fname);
 		return m_init(path);
@@ -286,8 +318,17 @@ public:
 	{
 		String uniformName(luaL_checkstring(L, 2));
 		String filename(luaL_checkstring(L, 3));
-		filename = Path::Normalize(folderPath + Path::sep + filename);
-		auto texture = g_application->LoadTexture(filename, true);
+		Image image;
+		if (chartSource)
+		{
+			image = ImageRes::Create(chartSource->ResolvePath(chartFolder + filename));
+		}
+		else
+		{
+			filename = Path::Normalize(folderPath + Path::sep + filename);
+			image = ImageRes::Create(filename);
+		}
+		auto texture = image ? TextureRes::Create(g_gl, image) : Texture();
 		if (texture)
 		{
 			textures.Add(uniformName, texture);
@@ -366,13 +407,18 @@ public:
 		return 1;
 	}
 
-	Material LoadBackgroundMaterial(const String &path)
+	Material LoadBackgroundMaterial(const Resource& fragmentShader)
 	{
 		String skin = g_gameConfig.GetString(GameConfigKeys::Skin);
 		String pathV = Path::Absolute(String("skins/" + skin + "/shaders/") + "background" + ".vs");
-		String pathF = Path::Absolute(path);
 		String pathG = Path::Absolute(String("skins/" + skin + "/shaders/") + "background" + ".gs");
-		Material ret = MaterialRes::Create(g_gl, pathV, pathF);
+		Material ret = MaterialRes::Create(g_gl);
+		Shader vertex = ShaderRes::Create(g_gl, ShaderType::Vertex, pathV);
+		Shader fragment = ShaderRes::Create(g_gl, ShaderType::Fragment, fragmentShader);
+		if (!ret || !vertex || !fragment)
+			return {};
+		ret->AssignShader(ShaderType::Vertex, vertex);
+		ret->AssignShader(ShaderType::Fragment, fragment);
 		// Additionally load geometry shader
 		if (Path::FileExists(pathG))
 		{

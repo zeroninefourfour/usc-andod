@@ -71,31 +71,37 @@ public:
 
 	void PerformScoreTick(Scoring& scoring, MapTime time);
 	void SendFinalScore(class Game* game, ClearMark clearState);
-	void GetMapBPMForSpeed(const String path, struct MultiplayerBPMInfo& info);
+	void GetMapBPMForSpeed(const ChartIndex& chart, struct MultiplayerBPMInfo& info);
 
+	[[nodiscard]]
 	ChartIndex* GetCurrentSelectedChart() const;
 
-	Vector<nlohmann::json> const* GetFinalStats() const
+	[[nodiscard]]
+	Vector<nlohmann::json> const* GetFinalStats() const noexcept
 	{
 		return &m_finalStats;
 	}
 
-	TCPSocket& GetTCP()
+	[[nodiscard]]
+	TCPSocket& GetTCP() noexcept
 	{
 		return m_tcp;
 	}
 
-	ChatOverlay* GetChatOverlay()
+	[[nodiscard]]
+	ChatOverlay* GetChatOverlay() noexcept
 	{
 		return m_chatOverlay;
 	}
 
-	String GetUserId()
+	[[nodiscard]]
+	String GetUserId() noexcept
 	{
 		return m_userId;
 	}
 
-	bool IsSynced() {
+	[[nodiscard]]
+	bool IsSynced() const noexcept {
 		return m_syncState == SyncState::SYNCED;
 	}
 
@@ -103,21 +109,24 @@ public:
 
 	bool IsSyncing();
 
-	void Fail() {
+	void Fail() noexcept {
 		m_failed = true;
 	}
 	
-	bool HasFailed()
+	[[nodiscard]]
+	bool HasFailed() const noexcept
 	{
 		return m_failed;
 	}
 
-	bool InRoom()
+	[[nodiscard]]
+	bool InRoom() const noexcept
 	{
 		return m_roomId != "";
 	}
 
-	const String& GetUserName()
+	[[nodiscard]]
+	const String& GetUserName() noexcept
 	{
 		return m_userName;
 	}
@@ -229,6 +238,7 @@ private:
 
 	// Instance of the database, used to look up songs
 	MapDatabase* m_mapDatabase;
+	Ref<class BackbeatCatalog> m_backbeatCatalog;
 
 	float m_advanceDiff = 0.0f;
 	float m_advanceRoom = 0.0f;

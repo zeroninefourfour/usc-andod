@@ -50,7 +50,7 @@ private:
 	//promote this to higher scope so i can use it in tick
 	String m_replayPath;
 
-	cpr::AsyncResponse m_irResponse;
+	std::unique_ptr<cpr::AsyncResponse> m_irResponse;
 	nlohmann::json m_irResponseJson;
 
 	HitWindow m_hitWindow = HitWindow::NORMAL;
@@ -276,26 +276,35 @@ private:
 		ScoreIndex* newScore = new ScoreIndex();
 		ChartIndex* chart = game->GetChartIndex();
 
-		// If chart file can't be opened, use existing hash.
 		String hash = chart->hash;
 
-
-		File chartFile;
-		if (chartFile.OpenRead(chart->path))
+		Resource chartResource = chart->LoadChart();
+		uint32_t digest[5];
+		sha1::SHA1 s;
+		bool hashed = false;
+		if (chartResource.IsPath())
 		{
+			File chartFile;
 			char data_buffer[0x80];
-			uint32_t digest[5];
-			sha1::SHA1 s;
-
-			size_t amount_read = 0;
-			size_t read_size;
-			do
+			if (chartFile.OpenRead(chartResource.GetPath()))
 			{
-				read_size = chartFile.Read(data_buffer, sizeof(data_buffer));
-				amount_read += read_size;
-				s.processBytes(data_buffer, read_size);
-			} while (read_size != 0);
-
+				size_t read_size;
+				do
+				{
+					read_size = chartFile.Read(data_buffer, sizeof(data_buffer));
+					s.processBytes(data_buffer, read_size);
+				} while (read_size != 0);
+				hashed = true;
+			}
+		}
+		else if (chartResource.IsValid())
+		{
+			const Ref<Buffer>& bytes = chartResource.GetBytes();
+			s.processBytes(bytes->data(), bytes->size());
+			hashed = true;
+		}
+		if (hashed)
+		{
 			s.getDigest(digest);
 			hash = Utility::Sprintf("%08x%08x%08x%08x%08x", digest[0], digest[1], digest[2], digest[3], digest[4]);
 		}
@@ -349,7 +358,7 @@ private:
 		if (g_gameConfig.GetString(GameConfigKeys::IRBaseURL) != "")
 		{
 			m_irState = IR::ResponseState::Pending;
-			m_irResponse = IR::PostScore(*newScore, m_beatmapSettings);
+			m_irResponse = std::make_unique<cpr::AsyncResponse>(std::move(IR::PostScore(*newScore, m_beatmapSettings)));
 		}
 
 		const bool cleared = Scoring::CalculateBadge(*newScore) >= ClearMark::NormalClear;
@@ -560,7 +569,7 @@ public:
 	}
 
 	ScoreScreen_Impl(class Game* game, MultiplayerScreen* multiplayer,
-		String uid, Vector<nlohmann::json> const* multistats, ChallengeManager* manager)
+		String uid, Vector<nlohmann::json> const* multistats, ChallengeManager* manager) : m_irResponse(nullptr)
 	{
 		m_challengeManager = manager;
 		m_displayIndex = 0;
@@ -689,7 +698,8 @@ public:
 
 		// Used for jacket images
 		m_beatmapSettings = game->GetBeatmap()->GetMapSettings();
-		m_jacketPath = Path::Normalize(game->GetChartRootPath() + Path::sep + m_beatmapSettings.jacketPath);
+		ChartIndex* scoreChart = game->GetChartIndex();
+		m_jacketPath = scoreChart ? g_application->RegisterChartResource(*scoreChart, m_beatmapSettings.jacketPath) : Path::Normalize(game->GetChartRootPath() + Path::sep + m_beatmapSettings.jacketPath);
 		m_jacketImage = game->GetJacketImage();
 
 		// Don't save the score if autoplay was on or if the song was launched using command line
@@ -1174,9 +1184,9 @@ public:
 			try {
 
 
-				if(m_irResponse.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+				if(m_irResponse->wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 				{
-					cpr::Response response = m_irResponse.get();
+					cpr::Response response = m_irResponse->get();
 
 		        	if(response.status_code != 200)
 					{

@@ -11,11 +11,13 @@ class AudioStream : public AudioBase
 {
 public:
 	static Ref<AudioStream> Create(Audio *audio, const String &path, bool preload);
+	static Ref<AudioStream> Create(Audio *audio, const Resource& resource, bool preload);
 	static Ref<AudioStream> Clone(Audio *audio, Ref<AudioStream> source);
 	virtual ~AudioStream() = default;
 	// Starts playback of the stream or continues a paused stream
 	virtual void Play() = 0;
 	virtual void Pause() = 0;
+	[[nodiscard]]
 	virtual bool HasEnded() const = 0;
 	// Sets the playback position in milliseconds
 	// negative time alowed, which will produce no audio for a certain amount of time

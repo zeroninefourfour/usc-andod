@@ -8,10 +8,15 @@ set(CPR_ENABLE_SSL OFF)
 #if(MSVC)
 #    set(CPR_FORCE_USE_SYSTEM_CURL ON) #curl should be available through vcpkg
 #endif(MSVC)
-add_subdirectory(cpr)
-target_include_directories(cpr PUBLIC ${CPR_INCLUDE_DIRS})
+if(USE_SYSTEM_CPR)
+    find_package(cpr REQUIRED)
+else()
+    add_subdirectory(cpr)
+    target_include_directories(cpr PUBLIC ${CPR_INCLUDE_DIRS})
+endif(USE_SYSTEM_CPR)
 
 #discord example program
+set(CLANG_FORMAT_SUFFIX "ignore") #try to disable clang formatter
 option(BUILD_EXAMPLES "Build example apps" OFF)
 add_subdirectory(discord-rpc)
 target_include_directories(discord-rpc PUBLIC discord-rpc/include)
@@ -38,7 +43,21 @@ add_library(sqlite3
     sqlite3/sqlite3ext.h
 )
 target_include_directories(sqlite3 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/sqlite3)
-target_compile_definitions(sqlite3 PUBLIC SQLITE_THREADSAFE=0)
+target_compile_definitions(sqlite3 PRIVATE
+    SQLITE_ENABLE_COLUMN_METADATA
+    SQLITE_ENABLE_FTS5
+    SQLITE_USE_URI=1
+)
+if(ANDROID)
+    target_compile_definitions(sqlite3 PUBLIC SQLITE_THREADSAFE=0)
+else()
+    target_compile_definitions(sqlite3 PRIVATE SQLITE_THREADSAFE=1)
+endif()
+
+#rapidjson -- add as interface library to prevent building it
+add_library(rapidjson INTERFACE)
+target_include_directories(rapidjson INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/rapidjson)
+
 #minimp3
 add_library(minimp3
     minimp3/minimp3.c

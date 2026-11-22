@@ -1,6 +1,9 @@
 # Unnamed SDVX clone ![language: C/C++](https://img.shields.io/badge/language-C%2FC%2B%2B-green.svg) [![Build](https://github.com/Drewol/unnamed-sdvx-clone/workflows/Build/badge.svg)](https://github.com/Drewol/unnamed-sdvx-clone/actions)
 A game based on [KShootMania](http://www.kshootmania.com/) and [SDVX](https://remywiki.com/What_is_SOUND_VOLTEX).
 
+### Project status
+This repository is practically in maintenance mode as I would much rather spend my time on the rewrite to Rust that can be found [here](https://github.com/Drewol/kson-rs).
+
 ### [**Download latest Windows build**](https://drewol.me/Downloads/Game.zip)
 
 ### [**FAQ**](https://github.com/Drewol/unnamed-sdvx-clone/wiki/F.-A.-Q.)
@@ -68,6 +71,7 @@ Just run 'usc-game' or 'usc-game_Debug' from within the 'bin' folder.
 - `-autoskip` - Skips beginning of song to the first chart note
 - `-debug` - Used to show relevant debug info in game such as hit timings, and scoring debug info
 - `-test` - Runs test scene, for development purposes only
+- `-gamedir` - Sets the directory the game loads assets from. If unset, attempts reading from `$XDG_DATA_HOME/unnamed-sdvx-clone`. Finally, uses the executable directory if all else fails.
 
 ## How to build:
 
@@ -97,8 +101,8 @@ To run from Visual Studio, go to Properties for Main > Debugging > Working Direc
 ### macOS:
 0. Clone the project using `git` and then run `git submodule update --init --recursive` to download the required submodules.
 1. Install dependencies
-	* [Homebrew](https://github.com/Homebrew/brew): `brew install cmake freetype libvorbis sdl2 libpng jpeg libarchive libiconv`
-2. Run `mac-cmake.sh` and then `make` from the root of the project.
+	* [Homebrew](https://github.com/Homebrew/brew): `brew install cmake freetype libvorbis sdl2 libpng jpeg-turbo libarchive libiconv`
+2. Run `cmake -DCMAKE_BUILD_TYPE=Release .` and then `make` from the root of the project.
 3. Run the executable made in the 'bin' folder.
 
 ### Embedded (Raspberry Pi):

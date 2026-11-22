@@ -6,18 +6,20 @@
         "zlib",
         "curl",
         "freetype",
+        "sdl2",
         "libjpeg-turbo",
         "libvorbis",
-        "sdl2",
         {
             "name": "libarchive",
             "default-features": false,
             "features": [
                 "bzip2",
+                "xar",
                 "lz4",
                 "lzma",
                 "lzo"
             ]
-        }
+        },
+        "libiconv"
     ]
 }

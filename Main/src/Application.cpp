@@ -16,6 +16,7 @@
 #include "ShadedMesh.hpp"
 #include "IR.hpp"
 #include <stdexcept>
+#include <Backbeat/BackbeatStore.hpp>
 
 #ifdef EMBEDDED
 #define NANOVG_GLES2_IMPLEMENTATION
@@ -282,7 +283,7 @@ int copyArchiveData(archive *ar, archive *aw)
 	size_t size;
 	la_int64_t offset;
 
-	for (;;)
+	while (true)
 	{
 		r = archive_read_data_block(ar, &buff, &size, &offset);
 		if (r == ARCHIVE_EOF)
@@ -339,7 +340,7 @@ void Application::m_unpackSkins()
 		bool singleDir = false;
 		bool otherFiles = false;
 
-		for (;;)
+		while (true)
 		{
 			res = archive_read_next_header(a, &entry);
 			if (res == ARCHIVE_EOF)
@@ -989,6 +990,62 @@ bool Application::m_Init()
 			if (k == "-gamedir")
 			{
 				Path::gameDir = v;
+			}
+		}
+	}
+
+	if (Path::gameDir.empty()) {
+		char* xdgDataDir = std::getenv("XDG_DATA_HOME");
+
+		if (xdgDataDir) {
+			String gameDir = Utility::Sprintf("%s%c%s", xdgDataDir, Path::sep, "unnamed-sdvx-clone");
+
+			auto gameDataSourceDir = Path::RemoveLast(Path::GetExecutablePath());
+			if (const char *xdgDataDirs = std::getenv("XDG_DATA_DIRS")) {
+				String xdgDataDirsStr(xdgDataDirs);
+				// iterate over XDG_DATA_DIRS and look for a folder with the correct name
+				// if it exists, overwrite gameDataSourceDir with it and break
+				if (!xdgDataDirsStr.empty()) {
+					std::stringstream ss (xdgDataDirsStr);
+					String dir;
+					while (getline (ss, dir, ':')) {
+						String fullDir = Utility::Sprintf("%s%c%s", dir, Path::sep, "unnamed-sdvx-clone");
+						if (Path::IsDirectory(fullDir)) {
+							gameDataSourceDir = fullDir;
+							break;
+						}
+					}
+				}
+			}
+
+			Path::gameDir = gameDir;
+
+			if (!Path::IsDirectory(gameDir)) {
+				Logf("%s does not yet exist. Creating...", Logger::Severity::Info, *gameDir);
+
+				auto response = Path::CreateDir(gameDir);
+				if (response == 1) {
+					Logf("Created: %s", Logger::Severity::Info, *gameDir, response);
+				} else {
+					Logf("Failed creating directory %s. The game will probably crash soon.", Logger::Severity::Info, *gameDir, response);
+				}
+
+				std::list<String> requiredDirectories = { "skins", "fonts", "audio", "LightPlugins" };
+
+				for (String directory : requiredDirectories) {
+					auto sourceDir = Utility::Sprintf("%s%c%s", gameDataSourceDir, Path::sep, directory);
+					auto destDir = Path::Absolute(directory);
+
+					response = Path::CopyDir(sourceDir, destDir);
+					if (response == 1) {
+						Logf("Copied: %s to %s", Logger::Severity::Info, *sourceDir, *destDir, response);
+					} else {
+						Logf("Failed copying %s to %s. The game will probably crash soon.", Logger::Severity::Error, *sourceDir, *destDir, response);
+					}
+				}
+
+			} else {
+				Logf("Setting gamedir to $XDG_DATA_HOME (%s). If data is missing, you can either copy the game data in %s to that directory, unset the $XDG_DATA_HOME variable or run the game with -gamedir=%s", Logger::Severity::Warning, *gameDir, *gameDataSourceDir, *gameDataSourceDir);
 			}
 		}
 	}
@@ -1785,6 +1842,38 @@ int Application::LoadImageJob(const String &path, Vector2i size, int placeholder
 		}
 	}
 	return ret;
+}
+
+String Application::RegisterChartResource(const ChartIndex& chart, const String& relativePath)
+{
+	if (chart.backbeat_bundle_id.empty())
+		return chart.ResolvePath(relativePath).GetPath();
+	return "bkb://" + chart.backbeat_bundle_id + "/" + relativePath;
+}
+
+Resource Application::ResolveResource(const String& path)
+{
+	const String prefix = "bkb://";
+	if (path.compare(0, prefix.size(), prefix) != 0)
+		return Resource::FromPath(path);
+	size_t pathStart = path.find('/', prefix.size());
+	if (pathStart == String::npos)
+		return {};
+	String bundleId = path.substr(prefix.size(), pathStart - prefix.size());
+	if (bundleId.empty())
+		return {};
+	return GetBackbeatStore()->ResolvePath(bundleId, path.substr(pathStart + 1));
+}
+
+int Application::CreateImage(const String& path, int imageFlags)
+{
+	Resource resource = ResolveResource(path);
+	if (!resource.IsValid())
+		return 0;
+	if (resource.IsPath())
+		return nvgCreateImage(g_guiState.vg, resource.GetPath().c_str(), imageFlags);
+	const Ref<Buffer>& bytes = resource.GetBytes();
+	return nvgCreateImageMem(g_guiState.vg, imageFlags, bytes->data(), (int)bytes->size());
 }
 
 void Application::SetScriptPath(lua_State *s)
@@ -2953,7 +3042,7 @@ bool JacketLoadingJob::Run()
 	}
 	else
 	{
-		loadedImage = ImageRes::Create(imagePath);
+		loadedImage = ImageRes::Create(g_application->ResolveResource(imagePath));
 		if (loadedImage)
 		{
 			if (loadedImage->GetSize().x > w || loadedImage->GetSize().y > h)
