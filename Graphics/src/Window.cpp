@@ -382,15 +382,15 @@ namespace Graphics
 					}
 					else if (evt.type == SDL_EventType::SDL_FINGERDOWN)
 					{
-						outer.OnTouchDown.Call((int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
+						outer.OnTouchDown.Call((int64)evt.tfinger.touchId, (int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
 					}
 					else if (evt.type == SDL_EventType::SDL_FINGERMOTION)
 					{
-						outer.OnTouchMove.Call((int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
+						outer.OnTouchMove.Call((int64)evt.tfinger.touchId, (int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
 					}
 					else if (evt.type == SDL_EventType::SDL_FINGERUP)
 					{
-						outer.OnTouchUp.Call((int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
+						outer.OnTouchUp.Call((int64)evt.tfinger.touchId, (int64)evt.tfinger.fingerId, evt.tfinger.x, evt.tfinger.y);
 					}
 					else if (evt.type == SDL_EventType::SDL_QUIT)
 					{

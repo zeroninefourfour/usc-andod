@@ -105,6 +105,17 @@ void Scoring::SetInput(Input* input)
 		// Synthetic touch edges bypass the bounce guard (see Input::m_TouchSynthPress)
 		m_input->SetTouchSyntheticEdgeNotify([this](Input::Button b) { MarkTouchSyntheticEdge(b); });
 		m_input->SetTouchSyntheticReleaseNotify([this](Input::Button b) { MarkTouchSyntheticRelease(b); });
+		// Laser pointer feedback for the touch laser chase (see
+		// Input::SetTouchLaserPositionProvider). Without it the touch layer can
+		// only integrate the deltas it emitted, which diverges from the visible
+		// pointer every time the auto-laser assist snaps it to the chart.
+		m_input->SetTouchLaserPositionProvider([this](uint32 laser, float& outPosition)
+			{
+				if (laser > 1 || m_currentLaserSegments[laser] == nullptr)
+					return false;
+				outPosition = laserPositions[laser];
+				return true;
+			});
 	}
 }
 
@@ -248,6 +259,7 @@ void Scoring::m_CleanupInput()
 		m_input->SetTouchCandidateProvider(nullptr);
 		m_input->SetTouchSyntheticEdgeNotify(nullptr);
 		m_input->SetTouchSyntheticReleaseNotify(nullptr);
+		m_input->SetTouchLaserPositionProvider(nullptr);
 		m_input = nullptr;
 	}
 }

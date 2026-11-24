@@ -60,10 +60,11 @@ public:
 	virtual void OnKeyPressed(SDL_Scancode code, int32 delta);
 	virtual void OnKeyReleased(SDL_Scancode code, int32 delta);
 	virtual void OnMouseMotion(int32 x, int32 y);
-	// Touch handlers, x/y are normalized screen coordinates (0..1)
-	virtual void OnTouchDown(int64 fingerId, float x, float y);
-	virtual void OnTouchMove(int64 fingerId, float x, float y);
-	virtual void OnTouchUp(int64 fingerId, float x, float y);
+	// Touch handlers, x/y are normalized screen coordinates (0..1).
+	// touchId identifies the touch device, fingerId the finger on that device.
+	virtual void OnTouchDown(int64 touchId, int64 fingerId, float x, float y);
+	virtual void OnTouchMove(int64 touchId, int64 fingerId, float x, float y);
+	virtual void OnTouchUp(int64 touchId, int64 fingerId, float x, float y);
 	virtual void OnFocusChanged(bool focused);
 
 	// Touch zone layout (shared between hit-testing and the on-screen overlay)
@@ -115,6 +116,15 @@ public:
 	// written. Null = no pool available.
 	using TouchCandidateProvider = std::function<uint32(TouchWindowCandidate* out, uint32 max)>;
 	void SetTouchCandidateProvider(TouchCandidateProvider provider);
+	// Reports where the in-game laser pointer currently is for a given laser
+	// (0/1), in the same 0..1 lane space the touch laser works in. The touch
+	// layer closes its follow loop on this so it can never drift away from the
+	// visible pointer (the scoring side's auto-laser assist may snap the
+	// pointer to the chart at any time). Returns false when there is no active
+	// laser segment, in which case the touch layer keeps its own estimate.
+	// Null = no feedback available (menus, no gameplay).
+	using TouchLaserPositionProvider = std::function<bool(uint32 laser, float& outPosition)>;
+	void SetTouchLaserPositionProvider(TouchLaserPositionProvider provider);
 	// Called right before a synthetic touch press edge (intent solver cycles /
 	// pair-derived FX cycles). The scoring side uses it to bypass its bounce
 	// guard, which would otherwise swallow a release+press cycle entirely.
@@ -212,6 +222,7 @@ private:
 	Graphics::Window* m_window = nullptr;
 
 	// Touch state
+	int64 m_touchDeviceIds[MAX_TOUCHES]; // touch device of the finger (SDL touchId)
 	int64 m_touchFingerIds[MAX_TOUCHES];
 	bool m_touchActive[MAX_TOUCHES];
 	int32 m_touchButton[MAX_TOUCHES];    // Button index or -1
@@ -227,17 +238,24 @@ private:
 	int32 m_activeTouchCount = 0;
 	bool m_touchZonesEnabled = false;
 	bool m_focused = true;
-	int32 m_FindTouchSlot(int64 fingerId) const;
+	int32 m_FindTouchSlot(int64 touchId, int64 fingerId) const;
+	bool m_TouchHoldsNothing(int32 slot) const;
 	void m_AssignZone(int32 slot, float x, float y);
+	// Normalized screen x -> laser target inside the finger's own half of the
+	// play area, with the laser axis inversion folded in.
+	float m_TouchLaserTargetFromX(int32 laser, float x);
 	void m_TouchSynthPress(Button b); // synthetic touch edge (bypasses scoring bounce guard)
 	void m_TouchRelease(Button b);    // touch release (bypasses scoring bounce guard)
 	bool m_SolverPressChannel(int32 button); // intent solver: press / cycle one channel
 	bool m_SolverFingerDown(int32 zone, bool& firedPrimary, bool& firedAlt); // intent solver: decide lane-press edges
-	void m_ReleaseAllTouches();
+	void m_ReleaseTouchButtons();  // drop the presses, keep tracking the fingers
+	void m_ReassignTouchZones();   // re-press tracked fingers that hold nothing
+	uint32 m_focusLostTick = 0;    // SDL ticks at the last focus loss, see OnFocusChanged
 	std::function<bool(Button)> m_touchFireFilter; // smart routing, see SetTouchButtonFireFilter
 	std::function<int32(Button)> m_touchFXEdgeHint; // pair-derived FX, see SetTouchFXEdgeHint
 	bool m_synthFXHeld[2] = { false, false }; // our synthetic FX press is held (per side)
 	TouchCandidateProvider m_touchCandidateProvider; // intent solver, see SetTouchCandidateProvider
+	TouchLaserPositionProvider m_touchLaserPositionProvider; // laser pointer feedback, see SetTouchLaserPositionProvider
 	std::function<void(Button)> m_touchSynthEdgeNotify; // see SetTouchSyntheticEdgeNotify
 	std::function<void(Button)> m_touchReleaseNotify;   // see SetTouchSyntheticReleaseNotify
 	static const int32 MAX_TOUCH_CANDIDATES = 32;

@@ -49,6 +49,7 @@ void Input::Init(Graphics::Window& wnd)
 	m_window->OnTouchUp.Add(this, &Input::OnTouchUp);
 	m_window->OnFocusChanged.Add(this, &Input::OnFocusChanged);
 
+	memset(m_touchDeviceIds, 0, sizeof(m_touchDeviceIds));
 	memset(m_touchFingerIds, 0, sizeof(m_touchFingerIds));
 	memset(m_touchActive, 0, sizeof(m_touchActive));
 	memset(m_touchButton, 0xff, sizeof(m_touchButton));
@@ -60,6 +61,7 @@ void Input::Init(Graphics::Window& wnd)
 	m_touchLaserActive[0] = m_touchLaserActive[1] = false;
 	m_touchLaserTarget[0] = m_touchLaserTarget[1] = 0.0f;
 	m_touchLaserEst[0] = m_touchLaserEst[1] = 0.0f;
+	m_activeTouchCount = 0;
 
 	m_lastMousePos[0] = m_window->GetMousePos().x;
 	m_lastMousePos[1] = m_window->GetMousePos().y;
@@ -288,14 +290,39 @@ void Input::Update(float deltaTime)
 	// Touch laser input overrides other devices while a finger is held on a laser
 	// zone. Swipe-follow logic (SDVX Ultimate Mobile style): the finger's x maps
 	// absolutely to the laser position, the laser chases it at a capped speed.
+	//
+	// The chase is a discrete-time feedback loop: with per-frame gain K the
+	// remaining error is multiplied by (1 - K) every frame, which only converges
+	// for 0 < K < 2. The previous version used a fixed gain of 10 with a +/-0.3
+	// clamp, i.e. a bang-bang limit cycle: after any movement bigger than ~3% of
+	// the lane it emitted +0.3 / -0.3 on alternating frames forever, even with
+	// the finger perfectly still. That also made the scoring side see a "wrong
+	// direction" input every other frame (draining the laser assist) and lose
+	// every other laser tick. Scale the gain by deltaTime and cap the speed
+	// instead, so the behaviour is identical at 30, 60, 120 or 144 Hz.
+	const float laserFollowRate = 14.0f; // 1/s, ~90% of the distance in 165 ms
+	const float laserMaxSpeed = 3.5f;    // lanes/s, about the speed of good key play
 	for (uint32 i = 0; i < 2; i++)
 	{
-		if (m_touchLaserActive[i])
-		{
-			float d = Math::Clamp((m_touchLaserTarget[i] - m_touchLaserEst[i]) * 10.0f, -0.3f, 0.3f);
-			m_laserStates[i] = d;
-			m_touchLaserEst[i] += d;
-		}
+		if (!m_touchLaserActive[i])
+			continue;
+
+		// Closed loop on the real pointer position when the scoring side can
+		// report it: the estimate is then always "where the in-game laser
+		// actually is", so the chase cannot drift away from it. This matters
+		// because the auto-laser assist snaps the pointer to the chart at any
+		// time, so an open-loop integral (what the old code kept) silently
+		// diverged from the visible laser position.
+		float pointer = 0.0f;
+		if (m_touchLaserPositionProvider && m_touchLaserPositionProvider(i, pointer))
+			m_touchLaserEst[i] = Math::Clamp(pointer, 0.0f, 1.0f);
+
+		const float factor = Math::Min(1.0f, laserFollowRate * deltaTime);
+		const float maxStep = laserMaxSpeed * deltaTime;
+		const float d = Math::Clamp(
+			(m_touchLaserTarget[i] - m_touchLaserEst[i]) * factor, -maxStep, maxStep);
+		m_touchLaserEst[i] = Math::Clamp(m_touchLaserEst[i] + d, 0.0f, 1.0f);
+		m_laserStates[i] = d;
 	}
 
 	// Touch intent solver (see GameConfigKeys::TouchSolver). Layers:
@@ -494,7 +521,12 @@ void Input::Update(float deltaTime)
 
 	for (size_t i = 0; i < 2; i++)
 	{
-		m_laserStates[i] *= m_laserDirections[i];
+		// The touch layer folds the inversion into its target mapping (see
+		// m_TouchLaserTargetFromX). Scaling the delta again here would make the
+		// finger chase a mirrored target with the wrong sign, so the laser would
+		// walk away from the finger and pin at one end.
+		if (!m_touchLaserActive[i])
+			m_laserStates[i] *= m_laserDirections[i];
 		m_absoluteLaserStates[i] = fmodf(m_absoluteLaserStates[i] + m_laserStates[i], Math::pi * 2);
 	}
 
@@ -747,17 +779,37 @@ void Input::OnMouseMotion(int32 x, int32 y)
 	m_mousePos[1] += y;
 }
 
-int32 Input::m_FindTouchSlot(int64 fingerId) const
+int32 Input::m_FindTouchSlot(int64 touchId, int64 fingerId) const
 {
 	for (int32 i = 0; i < MAX_TOUCHES; i++)
 	{
-		if (m_touchActive[i] && m_touchFingerIds[i] == fingerId)
+		// Finger ids are only unique per touch device: a stylus and a finger
+		// can both report finger id 0 at the same time. Matching on the finger
+		// id alone made the second device a "duplicate" of the first one (its
+		// press was swallowed and its release freed the other device's button).
+		if (m_touchActive[i] && m_touchFingerIds[i] == fingerId && m_touchDeviceIds[i] == touchId)
 			return i;
 	}
 	return -1;
 }
 
-void Input::m_ReleaseAllTouches()
+// A finger that is tracked but currently owns no button and no laser. That is
+// either a finger that was suspended (focus loss / zones disabled) or one that
+// landed on a screen where touch zones are mapped but not active (menus). Both
+// have to be re-assigned when the zones become active again, because no new
+// DOWN will ever arrive for them.
+bool Input::m_TouchHoldsNothing(int32 slot) const
+{
+	return m_touchButton[slot] < 0 && m_touchButtonAlt[slot] < 0 && m_touchLaser[slot] < 0;
+}
+
+// Releases everything the fingers were pressing but keeps tracking them. Used
+// when the input layer has to drop the button state for a reason that is not
+// "the finger is gone" (focus loss, touch zones temporarily disabled): the
+// fingers are usually still on the glass, and Android/SDL will not send a new
+// DOWN for them, so throwing the tracking away leaves the pad dead until the
+// player lifts and taps again.
+void Input::m_ReleaseTouchButtons()
 {
 	for (int32 i = 0; i < MAX_TOUCHES; i++)
 	{
@@ -767,25 +819,66 @@ void Input::m_ReleaseAllTouches()
 			m_TouchRelease((Button)m_touchButton[i]);
 		if (m_touchButtonAlt[i] >= 0)
 			m_TouchRelease((Button)m_touchButtonAlt[i]);
-		m_touchActive[i] = false;
+		// m_touchActive / m_touchFingerIds / m_touchLastX/Y are kept on purpose:
+		// the slot now "holds nothing", which is what m_ReassignTouchZones()
+		// looks for when the zones or the focus come back.
 		m_touchButton[i] = -1;
 		m_touchButtonAlt[i] = -1;
 		m_touchZone[i] = -1;
 		m_touchLaser[i] = -1;
 	}
 	m_touchLaserActive[0] = m_touchLaserActive[1] = false;
-	m_activeTouchCount = 0;
+}
+
+// Re-presses the zones of fingers that are still down but currently hold
+// nothing (after focus loss or a temporary touch-zone disable).
+void Input::m_ReassignTouchZones()
+{
+	if (!m_touchZonesEnabled || !m_window || !m_focused)
+		return;
+	Vector2i wndSize = m_window->GetWindowSize();
+	const float critY = CritLineY(wndSize.x, wndSize.y);
+	int32 reassigned = 0;
+	for (int32 i = 0; i < MAX_TOUCHES; i++)
+	{
+		if (!m_touchActive[i] || !m_TouchHoldsNothing(i))
+			continue;
+		// Never re-press Start/Back: those are supposed to be deliberate taps,
+		// and a palm that happens to rest in a top corner must not fire a
+		// second Back edge every time the window regains focus.
+		const int32 zone = ZoneAt(m_touchLastX[i], m_touchLastY[i], critY);
+		if (zone == TZ_Start || zone == TZ_Back)
+			continue;
+		m_AssignZone(i, m_touchLastX[i], m_touchLastY[i]);
+		reassigned++;
+	}
+	if (reassigned > 0)
+		Logf("Touch: re-pressed %d finger(s) still on screen", Logger::Severity::Info, reassigned);
 }
 
 void Input::OnFocusChanged(bool focused)
 {
 	m_focused = focused;
-	// On focus loss SDL may never deliver FINGERUP for held fingers; without this
-	// the stale slots would swallow the next touches (multi-touch "breaking")
+	// On focus loss SDL may never deliver FINGERUP for held fingers, so the
+	// presses have to be dropped. The fingers themselves are usually still on
+	// the glass (notification shade, system dialog, a stray palm at the top
+	// edge), and neither SDL nor Android will send a new DOWN for them, so keep
+	// the tracking and re-press their zones as soon as we are focused again -
+	// dropping the slots entirely made the whole pad dead until the player
+	// lifted every finger and tapped again.
 	if (!focused)
 	{
 		Logf("Touch: focus lost, releasing %d held touch(es)", Logger::Severity::Info, m_activeTouchCount);
-		m_ReleaseAllTouches();
+		m_ReleaseTouchButtons();
+		m_focusLostTick = SDL_GetTicks();
+	}
+	else if (SDL_GetTicks() - m_focusLostTick <= 1500)
+	{
+		// Only trust the kept slots for a short loss. Android normally sends a
+		// CANCEL (which clears them through FINGERUP) but if it did not and the
+		// player lifted the fingers in the meantime, re-pressing here would
+		// leave a button held forever - worse than the dead pad we are fixing.
+		m_ReassignTouchZones();
 	}
 }
 
@@ -899,7 +992,17 @@ void Input::SetTouchZonesEnabled(bool enabled)
 		return;
 	m_touchZonesEnabled = enabled;
 	if (!enabled)
-		m_ReleaseAllTouches(); // release everything any held finger was pressing
+	{
+		// A dialog or a screen without touch zones took over: release what the
+		// fingers were pressing, but keep tracking them. Zones come back while
+		// the player is still holding the pad (pause menu, transition into the
+		// song), and there is no new DOWN coming for those fingers.
+		m_ReleaseTouchButtons();
+	}
+	else
+	{
+		m_ReassignTouchZones();
+	}
 }
 
 void Input::SetTouchButtonFireFilter(std::function<bool(Button)> filter)
@@ -926,6 +1029,13 @@ void Input::SetTouchCandidateProvider(TouchCandidateProvider provider)
 	}
 	m_touchCandidateProvider = provider;
 	m_touchCandidateCount = 0;
+}
+
+void Input::SetTouchLaserPositionProvider(TouchLaserPositionProvider provider)
+{
+	m_touchLaserPositionProvider = provider;
+	// Nothing else to reset: the provider is only read while a laser finger is
+	// held, and the next read overwrites the estimate with the real pointer.
 }
 
 void Input::SetTouchSyntheticEdgeNotify(std::function<void(Button)> notify)
@@ -1112,6 +1222,25 @@ bool Input::IsTouchZoneActive(int32 zoneId) const
 	return false;
 }
 
+// Maps a normalized screen x to the target of the laser the finger owns.
+// The half of the play area is taken from the laser index, never from x: a
+// left-laser finger that slides past the middle of the screen must keep
+// addressing the left half. Mapping by x made the target jump from 1.0 to 0.0
+// when the finger crossed the centre, i.e. the laser teleported to the other
+// end while the player was still holding the same side.
+// Laser axis inversion (InvertLaserInput) is folded in here, because the touch
+// layer feeds the same signed delta integration the knob uses; applying the
+// inversion again in Update would make the finger chase a mirrored target with
+// the wrong sign.
+float Input::m_TouchLaserTargetFromX(int32 laser, float x)
+{
+	const float halfX = (laser == 0) ? x : x - 0.5f;
+	float t = Math::Clamp(halfX * 2.0f, 0.0f, 1.0f);
+	if (m_laserDirections[laser] < 0.0f)
+		t = 1.0f - t;
+	return t;
+}
+
 // Assigns a touch slot to the zone at (x, y) and presses the zone's button(s).
 // Shared by OnTouchDown and the ghost-release recovery path in OnTouchMove.
 void Input::m_AssignZone(int32 slot, float x, float y)
@@ -1148,9 +1277,15 @@ void Input::m_AssignZone(int32 slot, float x, float y)
 		m_touchLaserActive[laser] = true;
 		if (g_gameConfig.GetEnum<Enum_TouchLaserModes>(GameConfigKeys::TouchLaserMode) != TouchLaserModes::Relative)
 		{
-			m_touchLaserTarget[laser] = (x < 0.5f) ? Math::Clamp(x * 2.0f, 0.0f, 1.0f)
-			                                       : Math::Clamp((x - 0.5f) * 2.0f, 0.0f, 1.0f);
-			m_touchLaserEst[laser] = m_touchLaserTarget[laser];
+			m_touchLaserTarget[laser] = m_TouchLaserTargetFromX(laser, x);
+			// Do not snap the estimate to the finger target: the estimate is
+			// where the in-game laser pointer currently is, and the chase has to
+			// pull the pointer to the finger. Snapping it made the emitted delta
+			// exactly 0 on touch-down, so "absolute" mode never moved the laser
+			// to the finger and only reacted to movement afterwards.
+			float currentPointer = 0.0f;
+			if (m_touchLaserPositionProvider && m_touchLaserPositionProvider((uint32)laser, currentPointer))
+				m_touchLaserEst[laser] = Math::Clamp(currentPointer, 0.0f, 1.0f);
 		}
 	}
 	else
@@ -1200,16 +1335,23 @@ void Input::m_AssignZone(int32 slot, float x, float y)
 	}
 }
 
-void Input::OnTouchDown(int64 fingerId, float x, float y)
+void Input::OnTouchDown(int64 touchId, int64 fingerId, float x, float y)
 {
 	// Always track the finger (native multi-touch), even in menus where it only
 	// acts as a mouse click via SDL's touch->mouse emulation
-	int32 slot = m_FindTouchSlot(fingerId);
+	int32 slot = m_FindTouchSlot(touchId, fingerId);
 	if (slot >= 0)
 	{
-		// already tracked (duplicate DOWN): just refresh the position
+		// Already tracked. A repeated DOWN for a finger we still track means our
+		// table and the platform disagree (a lost UP, or a slot kept across a
+		// focus loss). If that slot currently holds nothing it is a suspended
+		// finger, so claim its zone for real instead of swallowing the press -
+		// otherwise the player has to lift and tap again before anything
+		// registers. If it does hold something this is a genuine duplicate.
 		m_touchLastX[slot] = x;
 		m_touchLastY[slot] = y;
+		if (m_TouchHoldsNothing(slot))
+			m_AssignZone(slot, x, y);
 		return;
 	}
 	{
@@ -1221,10 +1363,29 @@ void Input::OnTouchDown(int64 fingerId, float x, float y)
 				break;
 			}
 		}
+		// Table full: evict a suspended finger (tracked, but holding nothing)
+		// rather than dropping the new touch on the floor.
 		if (slot < 0)
+		{
+			for (int32 i = 0; i < MAX_TOUCHES; i++)
+			{
+				if (m_touchActive[i] && m_TouchHoldsNothing(i))
+				{
+					slot = i;
+					m_touchActive[i] = false;
+					m_activeTouchCount--;
+					break;
+				}
+			}
+		}
+		if (slot < 0)
+		{
+			Logf("Touch: no free slot for FINGERDOWN %lld", Logger::Severity::Warning, (long long)fingerId);
 			return;
+		}
 		m_touchActive[slot] = true;
 		m_touchFingerIds[slot] = fingerId;
+		m_touchDeviceIds[slot] = touchId;
 		m_activeTouchCount++;
 	}
 
@@ -1238,9 +1399,9 @@ void Input::OnTouchDown(int64 fingerId, float x, float y)
 	m_AssignZone(slot, x, y);
 }
 
-void Input::OnTouchMove(int64 fingerId, float x, float y)
+void Input::OnTouchMove(int64 touchId, int64 fingerId, float x, float y)
 {
-	int32 slot = m_FindTouchSlot(fingerId);
+	int32 slot = m_FindTouchSlot(touchId, fingerId);
 	if (slot < 0)
 	{
 		// Ghost-release recovery ("dropped touch"): when several fingers land at
@@ -1265,6 +1426,7 @@ void Input::OnTouchMove(int64 fingerId, float x, float y)
 			return;
 		m_touchActive[slot] = true;
 		m_touchFingerIds[slot] = fingerId;
+		m_touchDeviceIds[slot] = touchId;
 		m_activeTouchCount++;
 		m_touchButton[slot] = -1;
 		m_touchButtonAlt[slot] = -1;
@@ -1291,18 +1453,18 @@ void Input::OnTouchMove(int64 fingerId, float x, float y)
 		}
 		else
 		{
-			// Swipe-follow: finger x maps absolutely to the laser target position
-			m_touchLaserTarget[laser] = (x < 0.5f) ? Math::Clamp(x * 2.0f, 0.0f, 1.0f)
-			                                       : Math::Clamp((x - 0.5f) * 2.0f, 0.0f, 1.0f);
+			// Swipe-follow: finger x maps absolutely to the laser target
+			// position inside the finger's own half of the play area.
+			m_touchLaserTarget[laser] = m_TouchLaserTargetFromX(laser, x);
 		}
 	}
 	m_touchLastX[slot] = x;
 	m_touchLastY[slot] = y;
 }
 
-void Input::OnTouchUp(int64 fingerId, float x, float y)
+void Input::OnTouchUp(int64 touchId, int64 fingerId, float x, float y)
 {
-	int32 slot = m_FindTouchSlot(fingerId);
+	int32 slot = m_FindTouchSlot(touchId, fingerId);
 	if (slot < 0)
 	{
 		// Normally means a previous FINGERDOWN was lost (event flood) or focus
