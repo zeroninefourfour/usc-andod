@@ -133,10 +133,12 @@ bool Scoring::ShouldFireButton(Input::Button b) const
 	const ScoreTick* front = ticks.front();
 	if (front->HasFlag(TickFlags::Hold))
 		return true; // presses never kill a hold: they either get picked up or are a no-op
-const MapTime currentTime = m_GetInputTime(0) + m_inputOffset;
+	const MapTime currentTime = m_GetInputTime(0) + m_inputOffset;
 	const MapTime delta = currentTime - front->time;
+	// A press this early is not judged at all (m_ConsumeTick drops it), so firing
+	// the merged button would only hold it down for nothing.
 	if (delta < 0 && -delta > hitWindow.good)
-		return false; // pressing this early would instantly kill the note (m_ConsumeTick -> m_TickMiss)
+		return false;
 	return true; // in the hit window or already late (judged now / auto-miss imminent)
 }
 
