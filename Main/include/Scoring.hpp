@@ -112,6 +112,27 @@ public:
 	[[nodiscard]]
 	bool ShouldFireButton(Input::Button b) const;
 
+	// Pair-derived FX hint (A+B / C+D held together): 0 = release the
+	// synthetic FX press (re-arm), 1 = an FX tick needs a press edge right
+	// now, 2 = keep (hold sustain in progress).
+	[[nodiscard]]
+	uint32 GetTouchFXEdgeHint(Input::Button b) const;
+
+	// Touch intent solver: fills the candidate pool with all unjudged button
+	// ticks whose |delta| is inside the judgment window (±good).
+	// Returns the number of candidates written.
+	[[nodiscard]]
+	uint32 GetTouchWindowCandidates(Input::TouchWindowCandidate* out, uint32 max) const;
+
+	// Marks the next press of this button as a synthetic touch edge (intent
+	// solver / pair-derived FX cycles). Such an edge must bypass the bounce
+	// guard, because a cycle is a release+press inside the guard window by
+	// design (a real physical press never looks like that).
+	void MarkTouchSyntheticEdge(Input::Button b);
+	// Same for touch releases: bypass the bounce guard so a quick tap can
+	// always release its hold object.
+	void MarkTouchSyntheticRelease(Input::Button b);
+
 	void SetOptions(PlaybackOptions opts);
 	void SetEndTime(MapTime time);
 
@@ -368,6 +389,8 @@ private:
 	MapTime m_buttonReleaseTime[6] = { 0, 0, 0, 0, 0, 0 };
 	// Saves the time when a button was hit or released for bounce guarding
 	MapTime m_buttonGuardTime[6] = { 0, 0, 0, 0, 0, 0 };
+	bool m_synthEdgeBypass[8] = { false, false, false, false, false, false, false, false }; // bounce guard bypass for synthetic touch edges
+	bool m_synthReleaseBypass[8] = { false, false, false, false, false, false, false, false }; // ... and for touch releases
 
 	// Max number of ticks to assist
 	float m_assistLevel = 1.5f;

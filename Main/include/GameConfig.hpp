@@ -141,6 +141,8 @@ DefineEnum(GameConfigKeys,
 		   ShowTouchOverlay,     // Android: draw the on-screen touch zone overlay
 		   TouchLaserMode,       // Android: how touch drives the lasers
 		   TouchButtonVibration, // Android: haptic pulse on touch button presses
+		   TouchSolver,          // Android: touch intent solver (chart-aware guess of which button a lane press means)
+		   TouchAutoAssist,      // Android: semi-auto assist on top of the solver (state hold pickup, FX auto-taps)
 
 		   LastSelected,
 		   LastSelectedChal,

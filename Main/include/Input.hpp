@@ -81,6 +81,17 @@ public:
 		TZ_Count
 	};
 	struct TouchZoneInfo { float x, y, w, h; int32 zoneId; }; // normalized screen coords
+	// One hittable button/hold tick inside the judgment window, as collected by
+	// the gameplay scoring system for the touch intent solver (candidate pool).
+	struct TouchWindowCandidate
+	{
+		int32 button = -1;     // Input::Button index (0..5)
+		int32 time = 0;        // tick time, ms (MapTime)
+		int32 delta = 0;       // current - tick time, negative = tick still ahead
+		bool holdStart = false; // hold start tick (pickup candidate)
+		bool activeHold = false; // a hold on this button is currently active
+		bool pressReady = false; // a press edge right now would be judged (hold pickup or tap in perfect window)
+	};
 	static const int32 MAX_TOUCHES = 10;
 	// Enable/disable touch-zone mapping (gameplay screens). When disabled, touch
 	// acts as plain mouse clicks (handled by SDL touch->mouse emulation).
@@ -92,6 +103,31 @@ public:
 	// merged press must not steal it). A merged lane press only fires the
 	// buttons the filter accepts. Null = fire everything (legacy behavior).
 	void SetTouchButtonFireFilter(std::function<bool(Button)> filter);
+	// Pair-derived FX (A+B or C+D held together): per-frame hint from the
+	// gameplay scoring system about its FX queues. 0 = release (re-arm so the
+	// next tick gets a fresh press edge), 1 = press now (an FX tick needs the
+	// edge), 2 = keep (hold sustain in progress). Null = disabled.
+	void SetTouchFXEdgeHint(std::function<int32(Button)> hint);
+	// Touch intent solver plumbing: the gameplay scoring system provides all
+	// unjudged button ticks whose |delta| is inside the judgment window
+	// (±good). The solver consumes this candidate pool instead of the
+	// per-button filter/hint callbacks. Returns the number of candidates
+	// written. Null = no pool available.
+	using TouchCandidateProvider = std::function<uint32(TouchWindowCandidate* out, uint32 max)>;
+	void SetTouchCandidateProvider(TouchCandidateProvider provider);
+	// Called right before a synthetic touch press edge (intent solver cycles /
+	// pair-derived FX cycles). The scoring side uses it to bypass its bounce
+	// guard, which would otherwise swallow a release+press cycle entirely.
+	void SetTouchSyntheticEdgeNotify(std::function<void(Button)> notify);
+	// Same for touch releases: touch has no mechanical chatter, and a release
+	// swallowed by the bounce guard leaves hold objects (and the perceived
+	// button state) stuck.
+	void SetTouchSyntheticReleaseNotify(std::function<void(Button)> notify);
+	// Candidates collected for the current frame (intent solver working set)
+	[[nodiscard]]
+	int32 GetTouchCandidateCount() const { return m_touchCandidateCount; }
+	[[nodiscard]]
+	const TouchWindowCandidate* GetTouchCandidates() const { return m_touchCandidates; }
 	[[nodiscard]]
 	bool TouchZonesEnabled() const { return m_touchZonesEnabled; }
 	[[nodiscard]]
@@ -193,6 +229,19 @@ private:
 	bool m_focused = true;
 	int32 m_FindTouchSlot(int64 fingerId) const;
 	void m_AssignZone(int32 slot, float x, float y);
+	void m_TouchSynthPress(Button b); // synthetic touch edge (bypasses scoring bounce guard)
+	void m_TouchRelease(Button b);    // touch release (bypasses scoring bounce guard)
+	bool m_SolverPressChannel(int32 button); // intent solver: press / cycle one channel
+	bool m_SolverFingerDown(int32 zone, bool& firedPrimary, bool& firedAlt); // intent solver: decide lane-press edges
 	void m_ReleaseAllTouches();
 	std::function<bool(Button)> m_touchFireFilter; // smart routing, see SetTouchButtonFireFilter
+	std::function<int32(Button)> m_touchFXEdgeHint; // pair-derived FX, see SetTouchFXEdgeHint
+	bool m_synthFXHeld[2] = { false, false }; // our synthetic FX press is held (per side)
+	TouchCandidateProvider m_touchCandidateProvider; // intent solver, see SetTouchCandidateProvider
+	std::function<void(Button)> m_touchSynthEdgeNotify; // see SetTouchSyntheticEdgeNotify
+	std::function<void(Button)> m_touchReleaseNotify;   // see SetTouchSyntheticReleaseNotify
+	static const int32 MAX_TOUCH_CANDIDATES = 32;
+	TouchWindowCandidate m_touchCandidates[MAX_TOUCH_CANDIDATES];
+	int32 m_touchCandidateCount = 0;
+	bool m_solverHeld[6] = { false }; // intent solver synthetic press per channel
 };

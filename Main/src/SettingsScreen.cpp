@@ -145,7 +145,7 @@ protected:
 			}
 		}
 
-		LayoutRowDynamic(2, m_lineHeight * 12);
+		LayoutRowDynamic(2, m_lineHeight * 16);
 
 		if (nk_group_begin(m_nctx, "Button Input", NK_WINDOW_NO_SCROLLBAR))
 		{
@@ -157,6 +157,8 @@ protected:
 			EnumSetting<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout, "Touch controller layout:");
 			ToggleSetting(GameConfigKeys::ShowTouchOverlay, "Show touch zone overlay");
 			ToggleSetting(GameConfigKeys::TouchButtonVibration, "Vibrate on touch button press");
+			ToggleSetting(GameConfigKeys::TouchSolver, "Touch intent solver (map presses to notes)");
+			ToggleSetting(GameConfigKeys::TouchAutoAssist, "Touch auto assist (semi-auto)");
 #endif
 
 			nk_group_end(m_nctx);

@@ -97,6 +97,14 @@ void Scoring::SetInput(Input* input)
 		m_input->OnButtonReleased.Add(this, &Scoring::m_OnButtonReleased);
 		// Smart routing for merged touch lanes (see Input::SetTouchButtonFireFilter)
 		m_input->SetTouchButtonFireFilter([this](Input::Button b) { return ShouldFireButton(b); });
+		// Pair-derived FX edges for touch (see Input::SetTouchFXEdgeHint)
+		m_input->SetTouchFXEdgeHint([this](Input::Button b) { return (int32)GetTouchFXEdgeHint(b); });
+		// Intent solver candidate pool (see Input::SetTouchCandidateProvider)
+		m_input->SetTouchCandidateProvider([this](Input::TouchWindowCandidate* out, uint32 max)
+			{ return GetTouchWindowCandidates(out, max); });
+		// Synthetic touch edges bypass the bounce guard (see Input::m_TouchSynthPress)
+		m_input->SetTouchSyntheticEdgeNotify([this](Input::Button b) { MarkTouchSyntheticEdge(b); });
+		m_input->SetTouchSyntheticReleaseNotify([this](Input::Button b) { MarkTouchSyntheticRelease(b); });
 	}
 }
 
@@ -114,11 +122,112 @@ bool Scoring::ShouldFireButton(Input::Button b) const
 	const ScoreTick* front = ticks.front();
 	if (front->HasFlag(TickFlags::Hold))
 		return true; // presses never kill a hold: they either get picked up or are a no-op
-	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
 	const MapTime delta = currentTime - front->time;
 	if (delta < 0 && -delta > hitWindow.good)
 		return false; // pressing this early would instantly kill the note (m_ConsumeTick -> m_TickMiss)
 	return true; // in the hit window or already late (judged now / auto-miss imminent)
+}
+
+uint32 Scoring::GetTouchFXEdgeHint(Input::Button b) const
+{
+	const uint32 buttonCode = (uint32)b;
+	assert(buttonCode == (uint32)Input::Button::FX_0 || buttonCode == (uint32)Input::Button::FX_1);
+	if (autoplayInfo.IsAutoplayButtons() || m_replay != nullptr)
+		return 2; // no player input needed
+	if (IsObjectHeld(buttonCode))
+		return 2; // hold sustain in progress: keep the current state
+	const auto& ticks = m_ticks[buttonCode];
+	if (ticks.empty())
+		return 0;
+	const ScoreTick* front = ticks.front();
+	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+	if (front->HasFlag(TickFlags::Hold))
+	{
+		if (front->HasFlag(TickFlags::Ignore))
+			return 0; // trailing end marker of a finished hold
+		const HoldObjectState* hos = ((HoldObjectState*)front->object)->GetRoot();
+		if (hos->time - currentTime <= hitWindow.hold)
+			return 1; // hold ready to be picked up: needs a press edge now
+		return 0; // still ahead: stay released so the edge isn't wasted
+	}
+	const MapTime delta = currentTime - front->time;
+	if (delta >= -hitWindow.perfect)
+		return 1; // tap inside (or past) the perfect window: judge it now
+	return 0; // still ahead
+}
+
+uint32 Scoring::GetTouchWindowCandidates(Input::TouchWindowCandidate* out, uint32 max) const{
+	if (!out || !m_playback || autoplayInfo.IsAutoplayButtons() || m_replay != nullptr)
+		return 0;
+	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+	uint32 n = 0;
+	for (uint32 buttonCode = 0; buttonCode < 6 && n < max; buttonCode++)
+	{
+		const auto& ticks = m_ticks[buttonCode];
+		for (size_t i = 0; i < ticks.size() && n < max; i++)
+		{
+			const ScoreTick* tick = ticks[i];
+			if (tick->HasFlag(TickFlags::Laser))
+				continue;
+			const MapTime delta = currentTime - tick->time;
+			const bool isHold = tick->HasFlag(TickFlags::Hold);
+			// Window rules:
+			//  - plain taps: inside the good window
+			//  - hold ticks: pickup/resume is possible any time from the hold
+			//    window before the hold starts until the object ends, which is
+			//    what m_ConsumeTick accepts. This is what makes rolling back
+			//    into a late/broken hold work.
+			if (isHold)
+			{
+				if (tick->HasFlag(TickFlags::Ignore))
+					continue;
+				// All hold ticks of a hold that still spans the current time are
+				// listed. This is what keeps activeHold visible to the solver
+				// even when sustain ticks are spaced far apart - otherwise it
+				// would cycle over (and break) a hold it cannot see. Chained
+				// holds are measured on the segment the tick belongs to.
+				const HoldObjectState* seg = (const HoldObjectState*)tick->object;
+				const MapTime holdEnd = seg->time + seg->duration;
+				if (currentTime > holdEnd)
+					continue;
+			}
+			else if (delta < -hitWindow.good || delta > hitWindow.good)
+				continue;
+			Input::TouchWindowCandidate& c = out[n];
+			c.button = (int32)buttonCode;
+			c.time = tick->time;
+			c.delta = delta;
+			c.holdStart = isHold && tick->HasFlag(TickFlags::Start);
+			c.activeHold = IsObjectHeld(buttonCode);
+			// Would a press edge right now be judged?
+			//  - hold ticks: pressable while no hold is active (pickup AND
+			//    resume; a press on any hold tick re-attaches the hold)
+			//  - plain tap: anywhere inside the good window (early presses are
+			//    judged as Good by m_ConsumeTick; the cost function only uses
+			//    |delta| to prefer the closest candidate, never to drop a press)
+			if (isHold)
+				c.pressReady = !c.activeHold && delta >= -hitWindow.hold;
+			else
+				c.pressReady = true;
+			n++;
+		}
+	}
+	return n;
+}
+
+void Scoring::MarkTouchSyntheticEdge(Input::Button b)
+{
+	const uint32 buttonCode = (uint32)b;
+	assert(buttonCode < 8);
+	m_synthEdgeBypass[buttonCode] = true;
+}
+
+void Scoring::MarkTouchSyntheticRelease(Input::Button b)
+{
+	const uint32 buttonCode = (uint32)b;
+	assert(buttonCode < 8);
+	m_synthReleaseBypass[buttonCode] = true;
 }
 void Scoring::SetOptions(PlaybackOptions opts)
 {
@@ -135,6 +244,10 @@ void Scoring::m_CleanupInput()
 		m_input->OnButtonPressed.RemoveAll(this);
 		m_input->OnButtonReleased.RemoveAll(this);
 		m_input->SetTouchButtonFireFilter(nullptr);
+		m_input->SetTouchFXEdgeHint(nullptr);
+		m_input->SetTouchCandidateProvider(nullptr);
+		m_input->SetTouchSyntheticEdgeNotify(nullptr);
+		m_input->SetTouchSyntheticReleaseNotify(nullptr);
 		m_input = nullptr;
 	}
 }
@@ -1225,9 +1338,21 @@ ObjectState* Scoring::m_ConsumeTick(uint32 buttonCode, int32 inputDelta)
 			return nullptr;
 		}
 		if (abs(delta) <= hitWindow.good)
+		{
 			m_TickHit(tick, buttonCode, delta);
+		}
+		else if (delta > 0)
+		{
+			m_TickMiss(tick, buttonCode, delta); // late: judged as a miss
+		}
 		else
-			m_TickMiss(tick, buttonCode, delta);
+		{
+			// Early press outside the window: ignore it instead of killing
+			// the approaching note. Punishing this made mixed touch layouts
+			// steal each other's notes (a BT tap destroying the FX note half
+			// a second early); real cabinets ignore out-of-window presses.
+			return nullptr;
+		}
 		delete tick;
 		m_ticks[buttonCode].Remove(tick, false);
 
@@ -1734,12 +1859,18 @@ void Scoring::m_OnButtonPressed(Input::Button buttonCode, int32 delta)
 
 	if (buttonCode < Input::Button::BT_S)
 	{
-		int32 guardDelta = m_playback->GetLastTime() - m_buttonGuardTime[(uint32)buttonCode] - delta;
-		if (guardDelta < m_bounceGuard && guardDelta >= 0 && m_playback->GetLastTime() > 0.0)
-			return;
+		const uint32 buttonIndex = (uint32)buttonCode;
+		const bool synthetic = m_synthEdgeBypass[buttonIndex];
+		m_synthEdgeBypass[buttonIndex] = false;
+		if (!synthetic)
+		{
+			int32 guardDelta = m_playback->GetLastTime() - m_buttonGuardTime[buttonIndex] - delta;
+			if (guardDelta < m_bounceGuard && guardDelta >= 0 && m_playback->GetLastTime() > 0.0)
+				return;
+		}
 
-		m_buttonHitTime[(uint32)buttonCode] = m_playback->GetLastTime() - delta;
-		m_buttonGuardTime[(uint32)buttonCode] = m_playback->GetLastTime() - delta;
+		m_buttonHitTime[buttonIndex] = m_playback->GetLastTime() - delta;
+		m_buttonGuardTime[buttonIndex] = m_playback->GetLastTime() - delta;
 		ObjectState* obj = m_ConsumeTick((uint32)buttonCode, delta);
 		if (!obj)
 		{
@@ -1760,14 +1891,17 @@ void Scoring::m_OnButtonReleased(Input::Button buttonCode, int32 delta)
 {
 	if (buttonCode < Input::Button::BT_S)
 	{
-		int32 guardDelta = m_playback->GetLastTime() - m_buttonGuardTime[(uint32)buttonCode] - delta;
-		if (guardDelta < m_bounceGuard && guardDelta >= 0)
+		const uint32 buttonIndex = (uint32)buttonCode;
+		const bool synthetic = m_synthReleaseBypass[buttonIndex];
+		m_synthReleaseBypass[buttonIndex] = false;
+		int32 guardDelta = m_playback->GetLastTime() - m_buttonGuardTime[buttonIndex] - delta;
+		if (!synthetic && guardDelta < m_bounceGuard && guardDelta >= 0)
 		{
 			//Logf("Button %d release bounce guard hit at %dms", Logger::Severity::Info, buttonCode, m_playback->GetLastTime());
 			return;
 		}
-		m_buttonReleaseTime[(uint32)buttonCode] = m_playback->GetLastTime() - delta;
-		m_buttonGuardTime[(uint32)buttonCode] = m_playback->GetLastTime() - delta;
+		m_buttonReleaseTime[buttonIndex] = m_playback->GetLastTime() - delta;
+		m_buttonGuardTime[buttonIndex] = m_playback->GetLastTime() - delta;
 	}
 
 	//Logf("Button %d released at %dms", Logger::Severity::Info, buttonCode, m_playback->GetLastTime());

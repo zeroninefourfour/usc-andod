@@ -171,6 +171,10 @@ void Input::Cleanup()
 	}
 }
 
+// Cost of judging a candidate tick with a press on its channel right now
+// (single weight source of the touch intent solver; defined after Update).
+static float TouchCandidateCost(const Input::TouchWindowCandidate& c);
+
 void Input::Update(float deltaTime)
 {
 	for(auto it = m_mouseLocks.begin(); it != m_mouseLocks.end();)
@@ -274,6 +278,13 @@ void Input::Update(float deltaTime)
 		}
 	}
 
+	// Intent solver candidate pool: all unjudged button ticks inside the
+	// judgment window (±good), collected once per frame while touch zones are
+	// active. P0: plumbing only, the solver consumer arrives in P1.
+	m_touchCandidateCount = 0;
+	if (m_touchCandidateProvider && m_touchZonesEnabled)
+		m_touchCandidateCount = (int32)m_touchCandidateProvider(m_touchCandidates, MAX_TOUCH_CANDIDATES);
+
 	// Touch laser input overrides other devices while a finger is held on a laser
 	// zone. Swipe-follow logic (SDVX Ultimate Mobile style): the finger's x maps
 	// absolutely to the laser position, the laser chases it at a capped speed.
@@ -284,6 +295,200 @@ void Input::Update(float deltaTime)
 			float d = Math::Clamp((m_touchLaserTarget[i] - m_touchLaserEst[i]) * 10.0f, -0.3f, 0.3f);
 			m_laserStates[i] = d;
 			m_touchLaserEst[i] += d;
+		}
+	}
+
+	// Touch intent solver (see GameConfigKeys::TouchSolver). Layers:
+	//  - solver only: every lane press is routed through the candidate pool +
+	//    cost function, which guesses whether the press means FX-L/R or
+	//    BT-A..D (chart-aware disambiguation, no auto input)
+	//  - + TouchAutoAssist: adds the semi-auto channel layer (state hold
+	//    pickup, FX auto-taps) and replaces the pair-derived FX machinery
+	const bool solverEnabled = g_gameConfig.GetBool(GameConfigKeys::TouchSolver)
+		&& g_gameConfig.GetBool(GameConfigKeys::TouchAutoAssist)
+		&& m_touchCandidateProvider && m_touchZonesEnabled && m_focused;
+	// The legacy pair-derived FX machine only serves the non-solver mode
+	const bool pairMachineEnabled = !g_gameConfig.GetBool(GameConfigKeys::TouchSolver)
+		&& m_touchFXEdgeHint && m_touchZonesEnabled;
+
+	// Pair-derived FX buttons: while two fingers hold both lanes of a side
+	// (A+B or C+D), the pair acts as the side's FX button being held down.
+	// The scoring system hints each frame whether its FX queue needs a press
+	// edge (1), is clear to re-arm (0) or the hold sustain should be kept (2).
+	if (!solverEnabled && pairMachineEnabled)
+	// This makes e.g. an FX hold that starts *after* the BT holds, or repeated
+	// FX holds during one continuous pair hold, work without lifting or
+	// adding a third finger.
+	{
+		static const int32 pairLanes[2][2] =
+		{
+			{ TZ_Lane0, TZ_Lane1 }, // FX-L
+			{ TZ_Lane2, TZ_Lane3 }, // FX-R
+		};
+		const Button fxButtons[2] = { Button::FX_0, Button::FX_1 };
+		for (uint32 side = 0; side < 2; side++)
+		{
+			const Button fxButton = fxButtons[side];
+			const int32 fx = (int32)fxButton;
+
+			// Is the side's lane pair held by touch fingers?
+			bool pairHeld = false;
+			if (m_touchZonesEnabled)
+			{
+				bool lanes[2] = { false, false };
+				for (uint32 i = 0; i < MAX_TOUCHES && !(lanes[0] && lanes[1]); i++)
+				{
+					if (!m_touchActive[i])
+						continue;
+					if (m_touchZone[i] == pairLanes[side][0])
+						lanes[0] = true;
+					else if (m_touchZone[i] == pairLanes[side][1])
+						lanes[1] = true;
+				}
+				pairHeld = lanes[0] && lanes[1];
+			}
+
+			// Is a finger actually holding this FX button (merged press)?
+			auto realHolder = [&]()
+			{
+				for (uint32 i = 0; i < MAX_TOUCHES; i++)
+				{
+					if (m_touchActive[i] && (m_touchButton[i] == fx || m_touchButtonAlt[i] == fx))
+						return true;
+				}
+				return false;
+			};
+
+			if (!pairHeld)
+			{
+				// Pair broken: release our synthetic press, unless a finger
+				// owns the button via a merged lane press
+				if (m_synthFXHeld[side])
+				{
+					m_synthFXHeld[side] = false;
+					if (!realHolder())
+						m_TouchRelease(fxButton);
+				}
+				continue;
+			}
+
+			if (!m_touchFXEdgeHint || !m_focused)
+				continue;
+			const int32 hint = m_touchFXEdgeHint(fxButton);
+			if (hint == 1)
+			{
+				// An FX tick needs a press edge right now. Hold starts (and
+				// tap notes) are only judged on a rising edge, so a button
+				// that was already held idle (e.g. the fingers pressed the
+				// lanes long before the FX hold started) would miss it.
+				const bool touchOwned = m_synthFXHeld[side] || realHolder();
+				if (!m_buttonStates[(size_t)fxButton])
+				{
+					m_TouchSynthPress(fxButton);
+					m_synthFXHeld[side] = true;
+				}
+				else if (touchOwned)
+				{
+					// Generate a fresh edge without lifting the fingers
+					m_TouchRelease(fxButton);
+					m_TouchSynthPress(fxButton);
+					m_synthFXHeld[side] = true;
+				}
+				// else: another input device owns the button, leave it alone
+			}
+			else if (hint == 0 && m_synthFXHeld[side])
+			{
+				// Re-arm so a following tick can get a fresh press edge
+				m_synthFXHeld[side] = false;
+				if (!realHolder())
+					m_TouchRelease(fxButton);
+			}
+			// hint 2: hold sustain in progress, keep the current state
+		}
+	}
+
+	if (solverEnabled)
+	{
+		// Channel target states from the held zones
+		bool lanesHeld[4] = { false, false, false, false };
+		bool fxZoneHeld[2] = { false, false };
+		for (uint32 i = 0; i < MAX_TOUCHES; i++)
+		{
+			if (!m_touchActive[i])
+				continue;
+			const int32 z = m_touchZone[i];
+			if (z >= TZ_Lane0 && z <= TZ_Lane3)
+				lanesHeld[z - TZ_Lane0] = true;
+			else if (z == TZ_FX0)
+				fxZoneHeld[0] = true;
+			else if (z == TZ_FX1)
+				fxZoneHeld[1] = true;
+		}
+		const bool mergedLayout =
+			g_gameConfig.GetEnum<Enum_TouchControllerLayouts>(GameConfigKeys::TouchControllerLayout) == TouchControllerLayouts::UltimateMobile;
+		bool chTarget[6] = { false, false, false, false, false, false };
+		for (int32 b = 0; b < 4; b++)
+			chTarget[b] = lanesHeld[b];
+		if (mergedLayout)
+		{
+			chTarget[(int32)Button::FX_0] = lanesHeld[0] && lanesHeld[1];
+			chTarget[(int32)Button::FX_1] = lanesHeld[2] && lanesHeld[3];
+		}
+		else
+		{
+			chTarget[(int32)Button::FX_0] = fxZoneHeld[0];
+			chTarget[(int32)Button::FX_1] = fxZoneHeld[1];
+		}
+
+		for (int32 b = 0; b < 6; b++)
+		{
+			const Button button = (Button)b;
+			// Tap auto-cycling is an FX-only assist: a resting finger must not
+			// auto-play BT taps (four resting fingers would otherwise play the
+			// whole chart). BT taps need a fresh finger-down edge.
+			const bool tapCycleAllowed = (b == (int32)Button::FX_0 || b == (int32)Button::FX_1);
+			bool activeHold = false; // front has a hold in progress
+			bool wantsEdge = false;  // a press edge would be judged now
+			for (int32 i = 0; i < m_touchCandidateCount; i++)
+			{
+				const TouchWindowCandidate& c = m_touchCandidates[i];
+				if (c.button != b)
+					continue;
+				activeHold = activeHold || c.activeHold;
+				if (!c.holdStart && !tapCycleAllowed)
+					continue;
+				wantsEdge = wantsEdge || (TouchCandidateCost(c) < 1.0f);
+			}
+
+			// Finger merged presses claim the button in m_touchButton(Alt)
+			bool fingerClaims = false;
+			for (uint32 i = 0; i < MAX_TOUCHES && !fingerClaims; i++)
+			{
+				if (m_touchActive[i] && (m_touchButton[i] == b || m_touchButtonAlt[i] == b))
+					fingerClaims = true;
+			}
+
+			if (!chTarget[b])
+			{
+				// Fingers left the channel: drop the synthetic press. This must
+				// also happen mid-hold - lifting the finger ends the hold, like
+				// a real button (release is handled before the sustain case on
+				// purpose; the old order locked holds until their end).
+				if (m_solverHeld[b])
+				{
+					m_solverHeld[b] = false;
+					if (!fingerClaims && m_buttonStates[(size_t)button])
+						m_TouchRelease(button);
+				}
+				continue;
+			}
+			if (activeHold)
+				continue; // sustain with fingers still on the channel: keep
+			if (wantsEdge)
+			{
+				// Channel is covered and a tick wants the edge: press / cycle
+				(void)m_SolverPressChannel(b);
+			}
 		}
 	}
 
@@ -559,9 +764,9 @@ void Input::m_ReleaseAllTouches()
 		if (!m_touchActive[i])
 			continue;
 		if (m_touchButton[i] >= 0)
-			m_OnButtonInput((Button)m_touchButton[i], false, 0);
+			m_TouchRelease((Button)m_touchButton[i]);
 		if (m_touchButtonAlt[i] >= 0)
-			m_OnButtonInput((Button)m_touchButtonAlt[i], false, 0);
+			m_TouchRelease((Button)m_touchButtonAlt[i]);
 		m_touchActive[i] = false;
 		m_touchButton[i] = -1;
 		m_touchButtonAlt[i] = -1;
@@ -702,6 +907,157 @@ void Input::SetTouchButtonFireFilter(std::function<bool(Button)> filter)
 	m_touchFireFilter = filter;
 }
 
+void Input::SetTouchFXEdgeHint(std::function<int32(Button)> hint)
+{
+	m_touchFXEdgeHint = hint;
+	m_synthFXHeld[0] = m_synthFXHeld[1] = false;
+}
+
+void Input::SetTouchCandidateProvider(TouchCandidateProvider provider)
+{
+	// Drop any synthetic presses the intent solver still holds
+	for (int32 b = 0; b < 6; b++)
+	{
+		if (!m_solverHeld[b])
+			continue;
+		m_solverHeld[b] = false;
+		if (m_buttonStates[(size_t)b])
+			m_TouchRelease((Button)b);
+	}
+	m_touchCandidateProvider = provider;
+	m_touchCandidateCount = 0;
+}
+
+void Input::SetTouchSyntheticEdgeNotify(std::function<void(Button)> notify)
+{
+	m_touchSynthEdgeNotify = notify;
+}
+
+void Input::SetTouchSyntheticReleaseNotify(std::function<void(Button)> notify)
+{
+	m_touchReleaseNotify = notify;
+}
+
+// Presses a button from the touch layer as a synthetic edge. Must notify the
+// scoring side first so its bounce guard is bypassed: a cycle is a
+// release+press within the guard window by construction and would otherwise
+// be swallowed (the release itself re-arms the guard).
+void Input::m_TouchSynthPress(Button b)
+{
+	if (m_touchSynthEdgeNotify)
+		m_touchSynthEdgeNotify(b);
+	m_OnButtonInput(b, true, 0);
+}
+
+// Releases a button from the touch layer. Touch releases bypass the scoring
+// bounce guard: they never chatter, and a swallowed release leaves hold
+// objects (and the observable button state) stuck.
+void Input::m_TouchRelease(Button b)
+{
+	if (m_buttonStates[(size_t)b] && m_touchReleaseNotify)
+		m_touchReleaseNotify(b);
+	m_OnButtonInput(b, false, 0);
+	m_solverHeld[(size_t)b] = false;
+}
+
+// Cost of judging a candidate tick with a press on its channel right now.
+// Lower is better; >= 1.0 means the solver must not press for it yet.
+//   - running holds must not be disturbed by a press (dominant cost)
+//   - not pressable yet (outside the useful window) costs exactly 1.0
+//   - otherwise the timing distance (|delta| / good) scales the cost
+// This is the single weight source for both the finger-down edges and the
+// per-frame channel machinery; extend the terms here (lane affinity, pair
+// bonuses, ...) as the solver grows.
+static float TouchCandidateCost(const Input::TouchWindowCandidate& c)
+{
+	if (c.activeHold)
+		return 1000.0f;
+	if (!c.pressReady)
+		return 1.0f;
+	const float goodMs = 150.0f; // nominal good window, only scales the tie-break
+	return Math::Min(fabsf((float)c.delta) / goodMs, 0.99f);
+}
+
+// Presses or cycles (release+press) one touch channel. Cycling gives the
+// scoring side the rising edge it needs when the channel is already held.
+bool Input::m_SolverPressChannel(int32 b)
+{
+	const Button button = (Button)b;
+	bool fingerClaims = false;
+	for (uint32 i = 0; i < MAX_TOUCHES && !fingerClaims; i++)
+	{
+		if (m_touchActive[i] && (m_touchButton[i] == b || m_touchButtonAlt[i] == b))
+			fingerClaims = true;
+	}
+	if (!m_buttonStates[(size_t)button])
+	{
+		// State pickup: the channel is covered, judge the note / pick it up
+		m_TouchSynthPress(button);
+		m_solverHeld[b] = true;
+		return true;
+	}
+	if (m_solverHeld[b] || fingerClaims)
+	{
+		// Held idle without a usable edge: cycle to generate one
+		m_TouchRelease(button);
+		m_TouchSynthPress(button);
+		m_solverHeld[b] = true;
+		return true;
+	}
+	// Another input device owns the button: leave it alone
+	return false;
+}
+
+// Decides which buttons a fresh lane touch fires, from the candidate pool and
+// the cost function instead of blind merged presses. The closest candidate
+// wins; a second channel only joins in when it is nearly as close (a real
+// chord), so a distant note on the other channel is not judged early. Hold
+// starts are always taken when they are inside their pickup window (pickup
+// has no rating penalty). Returns true when at least one channel was pressed.
+bool Input::m_SolverFingerDown(int32 zone, bool& firedPrimary, bool& firedAlt)
+{
+	firedPrimary = false;
+	firedAlt = false;
+	TouchWindowCandidate pool[MAX_TOUCH_CANDIDATES];
+	const int32 count = m_touchCandidateProvider
+		? (int32)m_touchCandidateProvider(pool, MAX_TOUCH_CANDIDATES) : 0;
+
+	const Button primary = ZoneButton(zone);
+	const Button alt = ZoneButtonAlt(zone);
+	const int32 primaryButton = (int32)primary;
+	const int32 altButton = (alt == Button::Length) ? -1 : (int32)alt;
+
+	bool primaryHoldActive = false;
+	bool altHoldActive = false;
+	float altCost = 2.0f;
+	for (int32 i = 0; i < count; i++)
+	{
+		const TouchWindowCandidate& c = pool[i];
+		if (c.button == primaryButton)
+			primaryHoldActive = primaryHoldActive || c.activeHold;
+		else if (c.button == altButton)
+		{
+			altHoldActive = altHoldActive || c.activeHold;
+			altCost = Math::Min(altCost, TouchCandidateCost(c));
+		}
+	}
+
+	// Assist, not full control: the press itself ALWAYS reaches the pad. The
+	// primary BT of the zone is fired (or cycled when already held) no matter
+	// what the chart says; out-of-window presses are ignored by the engine,
+	// so this can never kill an approaching note. An active hold on that
+	// button is the only case we do not cycle over (it would break the hold).
+	if (primary != Button::Length && !primaryHoldActive)
+		firedPrimary = m_SolverPressChannel(primaryButton);
+
+	// The merged FX button is where the guessing happens: fire it only when an
+	// FX tick would actually be judged by this press.
+	if (altButton >= 0 && !altHoldActive && altCost < 1.0f)
+		firedAlt = m_SolverPressChannel(altButton);
+
+	return firedPrimary || firedAlt;
+}
+
 int32 Input::GetTouchZoneInfos(TouchZoneInfo* out, int32 maxZones) const
 {
 	if (!m_window)
@@ -800,36 +1156,45 @@ void Input::m_AssignZone(int32 slot, float x, float y)
 	else
 	{
 		// Button lane; every lane merges its FX button (A/B -> FX-L, C/D -> FX-R).
-		// Smart routing: when gameplay scoring installed the fire filter, each
-		// merged button is only fired if it would be judged right now (hit
-		// window / hold pickup / idle press). A button whose next note is still
-		// more than 'good' early is suppressed instead: the engine judges such
-		// a press as an instant miss, which would make a BT tap steal and kill
-		// the side's upcoming FX note (and vice versa). The suppressed button
-		// stays free, so a later lane tap can still judge its own note fresh.
+		// The press itself always reaches the pad (the engine ignores presses
+		// outside the judgment window, so nothing gets stolen); the intent
+		// solver additionally guesses whether the merged FX button should fire.
+		// A finger only claims buttons it actually pressed, so releasing the
+		// pressing finger always releases the button.
 		Button b = ZoneButton(zone);
 		Button bAlt = ZoneButtonAlt(zone);
-		if (m_touchFireFilter)
+		bool fireB = false, fireAlt = false;
+		const bool solverEdge = g_gameConfig.GetBool(GameConfigKeys::TouchSolver) && m_touchCandidateProvider;
+		if (solverEdge)
 		{
-			if (bAlt != Button::Length && !m_touchFireFilter(bAlt))
-				bAlt = Button::Length;
-			if (b != Button::Length && !m_touchFireFilter(b))
-				b = Button::Length;
+			// Edges go through the intent solver: candidate pool + cost function
+			// decide which channels this touch presses (or cycles).
+			m_SolverFingerDown(zone, fireB, fireAlt);
 		}
-		if (b != Button::Length)
+		else
 		{
+			// Plain merged press (pre-solver behavior). No chart filtering: the
+			// engine ignores out-of-window presses now, so a merged press can
+			// never steal an approaching note. Presses bypass the bounce guard
+			// like every other touch edge.
+			fireB = (b != Button::Length);
+			fireAlt = (bAlt != Button::Length);
+			if (fireB)
+				m_TouchSynthPress(b);
+			if (fireAlt)
+				m_TouchSynthPress(bAlt);
+		}
+		// Assist, not full control: a finger only claims what it actually
+		// pressed. A resting finger never keeps an untouched button held, so
+		// releasing the pressing finger always releases the button.
+		if (b != Button::Length && fireB)
 			m_touchButton[slot] = (int32)b;
-			m_OnButtonInput(b, true, 0);
-		}
-		if (bAlt != Button::Length)
-		{
+		if (bAlt != Button::Length && fireAlt)
 			m_touchButtonAlt[slot] = (int32)bAlt;
-			m_OnButtonInput(bAlt, true, 0);
-		}
 #ifdef ANDROID
 		// One pulse per tap even when BT and FX fired together; suppressed
-		// (smart-routed) buttons stay silent so a blocked tap feels blocked
-		if (b != Button::Length || bAlt != Button::Length)
+		// buttons stay silent so a blocked tap feels blocked
+		if (fireB || fireAlt)
 			TouchButtonHaptic();
 #endif
 	}
@@ -957,9 +1322,9 @@ void Input::OnTouchUp(int64 fingerId, float x, float y)
 		return false;
 	};
 	if (m_touchButton[slot] >= 0 && !stillHeld(m_touchButton[slot]))
-		m_OnButtonInput((Button)m_touchButton[slot], false, 0);
+		m_TouchRelease((Button)m_touchButton[slot]);
 	if (m_touchButtonAlt[slot] >= 0 && !stillHeld(m_touchButtonAlt[slot]))
-		m_OnButtonInput((Button)m_touchButtonAlt[slot], false, 0);
+		m_TouchRelease((Button)m_touchButtonAlt[slot]);
 	if (m_touchLaser[slot] >= 0)
 	{
 		int32 laser = m_touchLaser[slot];

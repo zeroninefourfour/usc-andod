@@ -146,6 +146,8 @@ void GameConfig::InitDefaults()
 	Set(GameConfigKeys::ShowTouchOverlay, true);
 	SetEnum<Enum_TouchLaserModes>(GameConfigKeys::TouchLaserMode, TouchLaserModes::Absolute);
 	Set(GameConfigKeys::TouchButtonVibration, true);
+	Set(GameConfigKeys::TouchSolver, false);
+	Set(GameConfigKeys::TouchAutoAssist, false);
 	SetEnum<Enum_ButtonComboModeSettings>(GameConfigKeys::UseBackCombo, ButtonComboModeSettings::Hold);
 	SetEnum<Enum_LaserAxisOption>(GameConfigKeys::InvertLaserInput, LaserAxisOption::None);
 
@@ -369,6 +371,8 @@ ConfigBase::KeyList GameConfigProfileSettings = {
 	Key(ShowTouchOverlay),
 	Key(TouchLaserMode),
 	Key(TouchButtonVibration),
+	Key(TouchSolver),
+	Key(TouchAutoAssist),
 
 	Key(LaserInputDevice),
 	Key(ButtonInputDevice),
