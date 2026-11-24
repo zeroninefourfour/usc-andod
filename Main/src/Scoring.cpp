@@ -133,7 +133,7 @@ bool Scoring::ShouldFireButton(Input::Button b) const
 	const ScoreTick* front = ticks.front();
 	if (front->HasFlag(TickFlags::Hold))
 		return true; // presses never kill a hold: they either get picked up or are a no-op
-const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+const MapTime currentTime = m_GetInputTime(0) + m_inputOffset;
 	const MapTime delta = currentTime - front->time;
 	if (delta < 0 && -delta > hitWindow.good)
 		return false; // pressing this early would instantly kill the note (m_ConsumeTick -> m_TickMiss)
@@ -152,7 +152,7 @@ uint32 Scoring::GetTouchFXEdgeHint(Input::Button b) const
 	if (ticks.empty())
 		return 0;
 	const ScoreTick* front = ticks.front();
-	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+	const MapTime currentTime = m_GetInputTime(0) + m_inputOffset;
 	if (front->HasFlag(TickFlags::Hold))
 	{
 		if (front->HasFlag(TickFlags::Ignore))
@@ -171,7 +171,7 @@ uint32 Scoring::GetTouchFXEdgeHint(Input::Button b) const
 uint32 Scoring::GetTouchWindowCandidates(Input::TouchWindowCandidate* out, uint32 max) const{
 	if (!out || !m_playback || autoplayInfo.IsAutoplayButtons() || m_replay != nullptr)
 		return 0;
-	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset;
+	const MapTime currentTime = m_GetInputTime(0) + m_inputOffset;
 	uint32 n = 0;
 	for (uint32 buttonCode = 0; buttonCode < 6 && n < max; buttonCode++)
 	{
@@ -437,9 +437,28 @@ void Scoring::FinishGame()
 	}
 }
 
+// Map time at which an input event happened. Events are delivered before the
+// next Scoring::Tick, i.e. while GetLastTime() still holds the time of the
+// *previous* tick, so judging at GetLastTime() makes every press look up to a
+// whole frame older than it is (which is what pushed presses into the "too
+// early, ignored" branch). Interpolate from the last tick with the wall clock
+// instead; the cap keeps a pause or a stall from pushing a press far ahead.
+MapTime Scoring::m_GetInputTime(int32 eventAge) const
+{
+	MapTime sinceTick = (MapTime)SDL_GetTicks() - (MapTime)m_lastTickWall;
+	// A stale tick means the game is paused or the frame took far longer than
+	// usual; do not extrapolate there, or a press made while paused would be
+	// judged somewhere in the future and could hit a note that is still ahead.
+	if (sinceTick < 0 || sinceTick > 100)
+		sinceTick = 0;
+	return m_lastTickTime + sinceTick - eventAge;
+}
+
 void Scoring::Tick(float deltaTime)
 {
 	const MapTime currentTime = m_playback->GetLastTime();
+	m_lastTickTime = currentTime;
+	m_lastTickWall = SDL_GetTicks();
 	if (m_replay)
 		m_replay->UpdateToTime(currentTime);
 
@@ -1327,7 +1346,7 @@ void Scoring::m_UpdateTicks()
 
 ObjectState* Scoring::m_ConsumeTick(uint32 buttonCode, int32 inputDelta)
 {
-	const MapTime currentTime = m_playback->GetLastTime() + m_inputOffset - inputDelta;
+	const MapTime currentTime = m_GetInputTime(inputDelta) + m_inputOffset;
 	assert(buttonCode < 8);
 
 	if (!m_ticks[buttonCode].empty())
@@ -1880,17 +1899,18 @@ void Scoring::m_OnButtonPressed(Input::Button buttonCode, int32 delta)
 	if (buttonCode < Input::Button::BT_S)
 	{
 		const uint32 buttonIndex = (uint32)buttonCode;
+		const MapTime eventTime = m_GetInputTime(delta);
 		const bool synthetic = m_synthEdgeBypass[buttonIndex];
 		m_synthEdgeBypass[buttonIndex] = false;
 		if (!synthetic)
 		{
-			int32 guardDelta = m_playback->GetLastTime() - m_buttonGuardTime[buttonIndex] - delta;
-			if (guardDelta < m_bounceGuard && guardDelta >= 0 && m_playback->GetLastTime() > 0.0)
+			int32 guardDelta = eventTime - m_buttonGuardTime[buttonIndex];
+			if (guardDelta < m_bounceGuard && guardDelta >= 0 && eventTime > 0.0)
 				return;
 		}
 
-		m_buttonHitTime[buttonIndex] = m_playback->GetLastTime() - delta;
-		m_buttonGuardTime[buttonIndex] = m_playback->GetLastTime() - delta;
+		m_buttonHitTime[buttonIndex] = eventTime;
+		m_buttonGuardTime[buttonIndex] = eventTime;
 		ObjectState* obj = m_ConsumeTick((uint32)buttonCode, delta);
 		if (!obj)
 		{
@@ -1912,16 +1932,17 @@ void Scoring::m_OnButtonReleased(Input::Button buttonCode, int32 delta)
 	if (buttonCode < Input::Button::BT_S)
 	{
 		const uint32 buttonIndex = (uint32)buttonCode;
+		const MapTime eventTime = m_GetInputTime(delta);
 		const bool synthetic = m_synthReleaseBypass[buttonIndex];
 		m_synthReleaseBypass[buttonIndex] = false;
-		int32 guardDelta = m_playback->GetLastTime() - m_buttonGuardTime[buttonIndex] - delta;
+		int32 guardDelta = eventTime - m_buttonGuardTime[buttonIndex];
 		if (!synthetic && guardDelta < m_bounceGuard && guardDelta >= 0)
 		{
 			//Logf("Button %d release bounce guard hit at %dms", Logger::Severity::Info, buttonCode, m_playback->GetLastTime());
 			return;
 		}
-		m_buttonReleaseTime[buttonIndex] = m_playback->GetLastTime() - delta;
-		m_buttonGuardTime[buttonIndex] = m_playback->GetLastTime() - delta;
+		m_buttonReleaseTime[buttonIndex] = eventTime;
+		m_buttonGuardTime[buttonIndex] = eventTime;
 	}
 
 	//Logf("Button %d released at %dms", Logger::Severity::Info, buttonCode, m_playback->GetLastTime());

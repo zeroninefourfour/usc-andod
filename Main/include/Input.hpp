@@ -62,9 +62,11 @@ public:
 	virtual void OnMouseMotion(int32 x, int32 y);
 	// Touch handlers, x/y are normalized screen coordinates (0..1).
 	// touchId identifies the touch device, fingerId the finger on that device.
-	virtual void OnTouchDown(int64 touchId, int64 fingerId, float x, float y);
-	virtual void OnTouchMove(int64 touchId, int64 fingerId, float x, float y);
-	virtual void OnTouchUp(int64 touchId, int64 fingerId, float x, float y);
+	// delta = milliseconds between the touch event and now, so presses can be
+	// judged at the time they really happened (see Scoring::m_GetInputTime)
+	virtual void OnTouchDown(int64 touchId, int64 fingerId, float x, float y, int32 delta);
+	virtual void OnTouchMove(int64 touchId, int64 fingerId, float x, float y, int32 delta);
+	virtual void OnTouchUp(int64 touchId, int64 fingerId, float x, float y, int32 delta);
 	virtual void OnFocusChanged(bool focused);
 
 	// Touch zone layout (shared between hit-testing and the on-screen overlay)
@@ -240,14 +242,14 @@ private:
 	bool m_focused = true;
 	int32 m_FindTouchSlot(int64 touchId, int64 fingerId) const;
 	bool m_TouchHoldsNothing(int32 slot) const;
-	void m_AssignZone(int32 slot, float x, float y);
+	void m_AssignZone(int32 slot, float x, float y, int32 delta);
 	// Normalized screen x -> laser target inside the finger's own half of the
 	// play area, with the laser axis inversion folded in.
 	float m_TouchLaserTargetFromX(int32 laser, float x);
-	void m_TouchSynthPress(Button b); // synthetic touch edge (bypasses scoring bounce guard)
+	void m_TouchSynthPress(Button b, int32 delta); // synthetic touch edge (bypasses scoring bounce guard)
 	void m_TouchRelease(Button b);    // touch release (bypasses scoring bounce guard)
-	bool m_SolverPressChannel(int32 button); // intent solver: press / cycle one channel
-	bool m_SolverFingerDown(int32 zone, bool& firedPrimary, bool& firedAlt); // intent solver: decide lane-press edges
+	bool m_SolverPressChannel(int32 button, int32 delta); // intent solver: press / cycle one channel
+	bool m_SolverFingerDown(int32 zone, bool& firedPrimary, bool& firedAlt, int32 delta); // intent solver: decide lane-press edges
 	void m_ReleaseTouchButtons();  // drop the presses, keep tracking the fingers
 	void m_ReassignTouchZones();   // re-press tracked fingers that hold nothing
 	uint32 m_focusLostTick = 0;    // SDL ticks at the last focus loss, see OnFocusChanged

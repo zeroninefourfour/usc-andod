@@ -161,9 +161,12 @@ namespace Graphics
 		// normalized x (0..1, left to right), normalized y (0..1, top to bottom).
 		// Both ids are needed: finger ids are only unique inside one touch device,
 		// so a stylus and a finger can report the same finger id at the same time.
-		Delegate<int64, int64, float, float> OnTouchDown;
-		Delegate<int64, int64, float, float> OnTouchMove;
-		Delegate<int64, int64, float, float> OnTouchUp;
+		// The last parameter is how many milliseconds ago the touch happened
+		// (event age), so the judgment can be placed at the real event time
+		// instead of the frame boundary.
+		Delegate<int64, int64, float, float, int32> OnTouchDown;
+		Delegate<int64, int64, float, float, int32> OnTouchMove;
+		Delegate<int64, int64, float, float, int32> OnTouchUp;
 		Delegate<SDL_Event> OnAnyEvent;
 		// Mouse scroll wheel 
 		//	Positive for scroll down

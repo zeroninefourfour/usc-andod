@@ -331,6 +331,10 @@ private:
 	void m_UpdateTicks();
 	// Tries to trigger a hit event on an approaching tick
 	ObjectState* m_ConsumeTick(uint32 buttonCode, int32 delta);
+	// Map time an input event happened at, interpolated from the last tick.
+	// eventAge is how many milliseconds ago the event was produced.
+	[[nodiscard]]
+	MapTime m_GetInputTime(int32 eventAge) const;
 	// Called whenether missed or not
 	void m_OnTickProcessed(ScoreTick* tick, uint32 index);
 	void m_TickHit(ScoreTick* tick, uint32 index, MapTime delta = 0);
@@ -402,6 +406,10 @@ private:
 	int32 m_inputOffset = 0;
 	int32 m_laserOffset = 0;
 	int32 m_bounceGuard = 0;
+	// Map time of the last Tick() and the wall clock it was sampled at, used to
+	// place input events between two ticks (see m_GetInputTime)
+	MapTime m_lastTickTime = 0;
+	uint32 m_lastTickWall = 0;
 	float m_drainMultiplier = 1.0f;
 	MapTime m_endTime = 180000;
 
