@@ -1363,6 +1363,14 @@ ObjectState* Scoring::m_ConsumeTick(uint32 buttonCode, int32 inputDelta)
 			// the approaching note. Punishing this made mixed touch layouts
 			// steal each other's notes (a BT tap destroying the FX note half
 			// a second early); real cabinets ignore out-of-window presses.
+			//
+			// Log it: this is the "I pressed and nothing happened" case. The
+			// press is dropped, the finger stays down, so no new press edge
+			// will be generated when the note does reach its window and the
+			// note is missed. Seeing these in the log separates that from a
+			// lost touch event.
+			Logf("Scoring: button %u press ignored, %.0f ms early", Logger::Severity::Info,
+				buttonCode, (double)-delta);
 			return nullptr;
 		}
 		delete tick;

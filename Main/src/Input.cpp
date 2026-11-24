@@ -10,23 +10,54 @@
 // (com.tutorial.game.HelloSDL2Activity.hapticVibrate) which owns the Vibrator
 // service on Android. Called on the SDL event thread; on any failure (no
 // vibrator, JNI trouble) it silently does nothing.
+//
+// The class/method lookup is cached: this runs on every lane press, i.e. up to
+// several times per frame in a four finger chord, and GetStaticMethodID is a
+// fair amount of work to repeat there. The cache is a global ref to the
+// activity class, which lives as long as the process.
 static void TouchButtonHaptic()
 {
 	if (!g_gameConfig.GetBool(GameConfigKeys::TouchButtonVibration))
 		return;
-	JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
-	jobject activity = (jobject)SDL_AndroidGetActivity();
-	if (!env || !activity)
+
+	// Coalesce a chord into one pulse: four fingers landing in the same frame
+	// are one physical hit as far as the player is concerned, and each
+	// Vibrator.vibrate() is a binder round trip on the thread that also has to
+	// deliver the remaining touch events.
+	static uint32 lastPulseTick = 0;
+	static bool pulsed = false;
+	const uint32 now = SDL_GetTicks();
+	if (pulsed && now - lastPulseTick < 25)
 		return;
-	jclass clazz = env->GetObjectClass(activity);
-	if (clazz)
+
+	JNIEnv* env = (JNIEnv*)SDL_AndroidGetJNIEnv();
+	if (!env)
+		return;
+
+	static jclass hapticClass = nullptr;
+	static jmethodID hapticMethod = nullptr;
+	if (!hapticMethod)
 	{
-		jmethodID method = env->GetStaticMethodID(clazz, "hapticVibrate", "(I)V");
-		if (method)
-			env->CallStaticVoidMethod(clazz, method, (jint)15);
-		env->DeleteLocalRef(clazz);
+		jobject activity = (jobject)SDL_AndroidGetActivity();
+		if (!activity)
+			return;
+		jclass localClass = env->GetObjectClass(activity);
+		if (localClass)
+		{
+			hapticClass = (jclass)env->NewGlobalRef(localClass);
+			env->DeleteLocalRef(localClass);
+		}
+		env->DeleteLocalRef(activity);
+		if (!hapticClass)
+			return;
+		hapticMethod = env->GetStaticMethodID(hapticClass, "hapticVibrate", "(I)V");
+		if (!hapticMethod)
+			return;
 	}
-	env->DeleteLocalRef(activity);
+
+	env->CallStaticVoidMethod(hapticClass, hapticMethod, (jint)15);
+	lastPulseTick = now;
+	pulsed = true;
 }
 #endif
 
@@ -208,21 +239,33 @@ void Input::Update(float deltaTime)
 
 	// While real touches are active, ignore the mouse (touch->mouse emulation would
 	// otherwise feed phantom laser movement when tapping buttons)
-	if(m_laserDevice == InputDevice::Mouse && m_activeTouchCount == 0)
+	if (m_laserDevice == InputDevice::Mouse)
 	{
-		for(uint32 i = 0; i < 2; i++)
+		if (m_activeTouchCount > 0)
 		{
-			if(m_mouseAxisMapping[i] > 1)
+			// SDL synthesizes mouse motion from the tracked touch while a finger
+			// is down. Drop it instead of letting it pile up: otherwise the
+			// whole accumulated movement is applied as one laser delta on the
+			// frame the last finger lifts, i.e. the laser jumps after every hold.
+			m_mousePos[0] = 0;
+			m_mousePos[1] = 0;
+		}
+		else
+		{
+			for(uint32 i = 0; i < 2; i++)
 			{
-				// INVALID MAPPING
-				m_laserStates[i] = 0.0f;
-				m_rawKeyLaserStates[i] = 0.0f;
-				continue;
+				if(m_mouseAxisMapping[i] > 1)
+				{
+					// INVALID MAPPING
+					m_laserStates[i] = 0.0f;
+					m_rawKeyLaserStates[i] = 0.0f;
+					continue;
+				}
+
+				m_laserStates[i] = m_mouseSensitivity * m_mousePos[m_mouseAxisMapping[i]];
+				m_rawLaserStates[i] = m_mousePos[m_mouseAxisMapping[i]];
+				m_mousePos[m_mouseAxisMapping[i]] = 0;
 			}
-			
-			m_laserStates[i] = m_mouseSensitivity * m_mousePos[m_mouseAxisMapping[i]];
-			m_rawLaserStates[i] = m_mousePos[m_mouseAxisMapping[i]];
-			m_mousePos[m_mouseAxisMapping[i]] = 0;
 		}
 	}
 
